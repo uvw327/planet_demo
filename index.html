@@ -62,6 +62,9 @@
     position: fixed; left: 18px; bottom: 14px;
     font: 12px ui-monospace, Consolas, monospace;
     color: #47596e;
+    /* 必须让点击穿透，否则左下角这一条会挡住画布，导致那一带点不中图块 */
+    pointer-events: none;
+    user-select: none;
   }
 
   /* ---------- 加载 / 报错 ---------- */
@@ -86,11 +89,12 @@
   <div class="row"><span class="k">纬&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lat">-</span></div>
   <div class="row"><span class="k">经&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lon">-</span></div>
   <div class="row"><span class="k">图&nbsp;&nbsp;&nbsp;&nbsp;块</span><span class="v" id="hud-id">-</span></div>
+  <div class="row"><span class="k">状&nbsp;&nbsp;&nbsp;&nbsp;态</span><span class="v" id="hud-state">-</span></div>
 </div>
 
 <div id="legend"></div>
 
-<div id="hint">拖动旋转 · 滚轮缩放 · 悬停查看图块</div>
+<div id="hint">拖动旋转 · 滚轮缩放 · 悬停查看 · 点击选中</div>
 
 <div id="loading">正在生成星球…</div>
 
@@ -197,6 +201,15 @@ const CONFIG = {
   // 若将来确实需要高低起伏，把下面这行改为 true 即可恢复「共享顶点半径」的隆起方案（无缝隙）。
   enableHeightOffset: false,
   heightScale: 0.10,         // 隆起幅度，仅在 enableHeightOffset 为 true 时生效
+
+  /* --- 渲染（移动端优先）--- */
+  // 合并几何体后整颗星球只占 1 个 draw call，此时每一分渲染开销都会直接变成
+  // 手机的电量与帧率，所以下面几项一律"够用就好"。
+  maxPixelRatio: 2,          // 设备像素比上限：手机 DPR 常为 3，限到 2 省约 55% 填充率
+  antialias: true,           // MSAA。关掉能再省一点填充率，但六边形边缘会明显锯齿
+  hoverTint: 0.38,           // 悬停高亮强度（0 = 本色，1 = 纯白）；与重构前的观感一致
+  selectionTint: 0.55,       // 选中高亮强度
+  selectionColor: 0x8fe3ff,  // 选中色：偏青，与 12 种群系色都不撞
 
   /* --- 其他 --- */
   enableRotation: false,     // 行星自转
@@ -649,38 +662,134 @@ function computeDualRadius(faces, polygons) {
 }
 
 /**
- * 为一个图块构建几何体：把 n 边形展开成 n 个三角形组成的扇形。
+ * 把全部图块合并成【一份】几何体 —— 整颗星球 = 1 个 Mesh = 1 个 draw call。
  *
- * 扇心取「中心方向 × 顶点平均半径」，而不是顶点坐标的算术平均：
- * 后者会落到球体内部（造成内凹），且在顶点半径不等时会偏离面片平面。
+ * ■ 为什么必须合并
+ *   重构前每个图块一个 Mesh，level 5 就是 10242 个 Mesh，每帧 10242 次 draw call。
+ *   手机 GPU 每帧的 draw call 预算只有几十到几百，超出约百倍 —— 必然卡顿。
+ *   真正的瓶颈从来不是三角形数量（才 6 万个，对任何 GPU 都是小菜），
+ *   而是 draw call 次数，以及每个 Mesh 各自的材质/包围盒/矩阵带来的 CPU 开销。
+ *
+ * ■ 顶点布局（索引化扇形）
+ *   每个图块用「扇心 + n 个环顶点」= n+1 个顶点、n 个三角形。
+ *   因为建了索引，n 个三角形共用同一个扇心顶点：
+ *     六边形 18 个顶点 → 7 个；五边形 15 个 → 6 个。
+ *   总顶点数从「不共享」的 184320 降到 71682，省掉约 61% 的顶点带宽。
+ *
+ * ■ 为什么不跨图块共享顶点（重要取舍）
+ *   跨图块共享顶点 = 相邻图块共用同一个顶点，而一个顶点只能有一个颜色，
+ *   于是相邻群系之间必然出现「顶点色插值渐变」，会毁掉本星球
+ *   「每一格一个纯色」的设计语言（正是之前走过弯路的地方）。
+ *   **只在图块内部共享扇心**，是保持每格纯色的前提下能拿到的最优解。
+ *
+ * ■ 法线
+ *   直接取 position 归一化，也就是球面的**解析法线**，比 computeVertexNormals()
+ *   的逐面平均更平滑（后者在球面上会带出网格状的细微起伏）。
+ *   注意当前材质是 MeshBasicMaterial（完全不受光照），法线并不参与着色；
+ *   保留它是为了将来换成光照材质时，球面依然是平滑的而不是多面体。
+ *
+ * ■ 返回值的映射表：渲染层与业务层之间唯一的桥
+ *   triToTile[faceIndex] → 该三角形属于哪个图块        （拾取用）
+ *   tileVertStart/Count  → 该图块占据哪一段顶点区间    （改色/高亮用）
+ *   tileIndexStart/Count → 该图块占据哪一段索引区间    （调试用）
  */
-function buildTileGeometry(tile) {
-  const verts = tile.vertices;
-  const n = verts.length;
+function buildPlanetGeometry(tiles) {
+  const nTiles = tiles.length;
 
-  let sumR = 0;
-  for (const v of verts) sumR += v.length();
-  const avgR = sumR / n;
-
-  // center 本身已是单位向量，无需再次归一化
-  const cx = tile.center.x * avgR;
-  const cy = tile.center.y * avgR;
-  const cz = tile.center.z * avgR;
-
-  const positions = new Float32Array(n * 9);
-  let o = 0;
-  for (let i = 0; i < n; i++) {
-    const a = verts[i];
-    const b = verts[(i + 1) % n];
-    positions[o++] = cx; positions[o++] = cy; positions[o++] = cz;  // 扇心
-    positions[o++] = a.x; positions[o++] = a.y; positions[o++] = a.z;
-    positions[o++] = b.x; positions[o++] = b.y; positions[o++] = b.z;
+  // ---- 1. 先统计总量，一次性分配定型数组（避免任何中间对象）----
+  let totalVerts = 0;
+  let totalIndices = 0;
+  for (const tile of tiles) {
+    const n = tile.vertices.length;   // 5（五边形）或 6（六边形）
+    totalVerts += n + 1;
+    totalIndices += n * 3;
   }
 
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.computeBoundingSphere();   // 供 raycast 快速剔除
-  return geo;
+  const positions = new Float32Array(totalVerts * 3);
+  const normals   = new Float32Array(totalVerts * 3);
+  const colors    = new Float32Array(totalVerts * 3);
+  // 顶点数 71682 > 65535，索引必须用 Uint32（WebGL2 原生支持，不需要扩展）
+  const indices   = new Uint32Array(totalIndices);
+
+  const triCount = totalIndices / 3;
+  const triToTile      = new Uint32Array(triCount);
+  const tileVertStart  = new Uint32Array(nTiles);
+  const tileVertCount  = new Uint8Array(nTiles);    // 6 或 7
+  const tileIndexStart = new Uint32Array(nTiles);
+
+  const col = new THREE.Color();
+
+  let vo = 0;   // 顶点写指针（单位：顶点数，不是分量数）
+  let io = 0;   // 索引写指针
+  let to = 0;   // 三角形写指针
+
+  for (let ti = 0; ti < nTiles; ti++) {
+    const tile = tiles[ti];
+    const verts = tile.vertices;
+    const n = verts.length;
+
+    tileVertStart[ti]  = vo;
+    tileVertCount[ti]  = n + 1;
+    tileIndexStart[ti] = io;
+
+    // ---- 2. 扇心：中心方向 × 顶点平均半径 ----
+    // 取「中心方向 × 平均半径」而不是顶点坐标的算术平均：后者会落到球体内部
+    // （造成内凹），且在图块各顶点半径不等时会偏离面片平面。
+    let sumR = 0;
+    for (const v of verts) sumR += v.length();
+    const avgR = sumR / n;
+
+    const base = vo;
+    const cx = tile.center.x * avgR;
+    const cy = tile.center.y * avgR;
+    const cz = tile.center.z * avgR;
+
+    // 群系本色（setHex 会按 three 的色彩管理把 sRGB 转到线性工作空间，
+    // 因此写进顶点色后与重构前 material.color 的观感完全一致）
+    col.setHex(BIOME_COLOR[tile.biome]);
+    const cr = col.r, cg = col.g, cb = col.b;
+
+    // 2.1 扇心顶点：法线即单位中心方向（center 本身已是单位向量）
+    let p = vo * 3;
+    positions[p] = cx; positions[p + 1] = cy; positions[p + 2] = cz;
+    normals[p] = tile.center.x; normals[p + 1] = tile.center.y; normals[p + 2] = tile.center.z;
+    colors[p] = cr; colors[p + 1] = cg; colors[p + 2] = cb;
+    vo++;
+
+    // 2.2 n 个环顶点
+    for (let i = 0; i < n; i++) {
+      const v = verts[i];
+      p = vo * 3;
+      positions[p] = v.x; positions[p + 1] = v.y; positions[p + 2] = v.z;
+      const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) || 1;
+      normals[p] = v.x / len; normals[p + 1] = v.y / len; normals[p + 2] = v.z / len;
+      colors[p] = cr; colors[p + 1] = cg; colors[p + 2] = cb;
+      vo++;
+    }
+
+    // ---- 3. 索引：把 n 边形展开成 n 个三角形组成的扇形 ----
+    // 环序由 buildDual 保证从球外看为逆时针，所以这里统一是正面朝外。
+    for (let i = 0; i < n; i++) {
+      indices[io++] = base;                       // 扇心
+      indices[io++] = base + 1 + i;               // 环顶点 i
+      indices[io++] = base + 1 + ((i + 1) % n);   // 环顶点 i+1
+      triToTile[to++] = ti;                       // 这个三角形属于图块 ti
+    }
+  }
+
+  // ---- 4. 组装 BufferGeometry ----
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('normal',   new THREE.BufferAttribute(normals, 3));
+  geometry.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeBoundingSphere();   // 拾取与视锥剔除都要用
+
+  return {
+    geometry, positions, normals, colors, indices,
+    triToTile, tileVertStart, tileVertCount, tileIndexStart,
+    triCount, vertexCount: totalVerts,
+  };
 }
 
 /* =========================================================================
@@ -695,9 +804,16 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0, 0.7, 2.9);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({
+  antialias: CONFIG.antialias,
+  // 关掉不需要的通道：本星球没有阴影、没有后处理、没有半透明排序，
+  // 每一项在手机上都是实打实的带宽与电量。
+  stencil: false,
+  powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.maxPixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false;          // 明确关闭（默认也是 false，写出来防止将来被误开）
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -740,18 +856,54 @@ function createStarfield() {
 scene.add(createStarfield());
 
 /* =========================================================================
- * §7  交互：射线拾取、高亮、HUD
+ * §7  交互：射线拾取、高亮、选中、矿石层、HUD
+ * -------------------------------------------------------------------------
+ * 三条设计约束（都来自移动端性能预算）：
+ *   ① 拾取：一次 raycaster.intersectObject(唯一个 Mesh)，用 faceIndex 查表。
+ *   ② 高亮/选中：只改顶点色的一个小区间并局部上传，**不新建任何 Mesh**。
+ *   ③ 矿石：全部共用一个 InstancedMesh 与一份材质，draw call 只 +1。
  * ========================================================================= */
 
-let tileMeshes = [];               // 只装图块 mesh，供 raycaster 使用
-let hoveredTile = null;
-let needsPick = false;
+/** 渲染层句柄。由 init() 装配；业务数据（tiles / world）完全不依赖它 */
+const gfx = {
+  mesh: null,          // 唯一的星球 Mesh
+  colors: null,        // 顶点色 Float32Array（就是 geometry 的 color 属性用的那个数组）
+  colorAttr: null,     // 顶点色 BufferAttribute，用于区间更新
+  triToTile: null,     // 三角形序号 → 图块序号
+  tileVertStart: null, // 图块 → 顶点区间起点
+  tileVertCount: null, // 图块 → 顶点区间长度
+  outline: null,       // 可复用的选中描边（整颗星球永远只有 1 个）
+  outlinePos: null,
+  oreLayer: null,      // 矿石层（InstancedMesh，第一次放矿时才创建）
+};
+
+const ORE_CAPACITY = 512;
+
+let tiles = [];            // 业务数据：每格的群系/海拔/气候（init 中填充）
+let hoveredIndex = -1;     // 悬停中的图块（-1 = 无）
+let selectedIndex = -1;    // 选中的图块（-1 = 无）
+let needsPick = false;     // 拾取请求：合并到动画循环里执行，避免事件风暴
 let pointerInside = false;
+let lastPointerX = 0;
+let lastPointerY = 0;
+
+/**
+ * 业务数据层。
+ *
+ * 这一层是纯 JS 数组，渲染层只按「有了就画」的规则读它，
+ * 完全不知道 ore 是矿、owner 是势力 —— 将来加资源/归属/出生地只改这里。
+ */
+const world = {
+  ore: null,         // Int8Array：0 = 无矿，>0 = 矿种 id
+  oreAmount: null,   // Uint16Array：储量
+  owner: null,       // Int16Array：归属，-1 = 无主
+};
 
 const raycaster = new THREE.Raycaster();
 const pointerNDC = new THREE.Vector2();
-const HIGHLIGHT_COLOR = new THREE.Color(0xffffff);
-const tmpColor = new THREE.Color();
+const WHITE = new THREE.Color(0xffffff);
+const SELECTION_COLOR = new THREE.Color(CONFIG.selectionColor);
+const scratchColor = new THREE.Color();
 
 const hudEl = document.getElementById('hud');
 const hudBiome = document.getElementById('hud-biome');
@@ -761,6 +913,7 @@ const hudElev = document.getElementById('hud-elev');
 const hudLat = document.getElementById('hud-lat');
 const hudLon = document.getElementById('hud-lon');
 const hudId = document.getElementById('hud-id');
+const hudState = document.getElementById('hud-state');
 
 function updateHud(tile) {
   // center.y 即 sin(地理纬度)；经度以 +Z 为 0°、向东为正
@@ -776,55 +929,299 @@ function updateHud(tile) {
   hudId.textContent = `#${tile.index} · ${tile.vertexIndices.length} 边形`;
 }
 
-function updateHover() {
-  if (!pointerInside) {
-    applyHover(null);
+/* -------------------------------------------------------------------------
+ * 7.1  顶点色：高亮 / 选中
+ * ------------------------------------------------------------------------- */
+
+/** 一个图块「当前该显示的颜色」= 群系本色 + 悬停/选中的瞬时提亮（选中优先） */
+function computeTileColor(ti, out) {
+  out.copy(tiles[ti].baseColor);
+  if (ti === selectedIndex) {
+    out.lerp(SELECTION_COLOR, CONFIG.selectionTint);
+  } else if (ti === hoveredIndex) {
+    out.lerp(WHITE, CONFIG.hoverTint);
+  }
+  return out;
+}
+
+/** 把图块 ti「当前该显示的颜色」写进顶点色数组。只写数组，不负责标记脏区间。 */
+function writeTileColor(ti) {
+  computeTileColor(ti, scratchColor);
+  const start = gfx.tileVertStart[ti];
+  const count = gfx.tileVertCount[ti];
+  const colors = gfx.colors;
+  const r = scratchColor.r, g = scratchColor.g, b = scratchColor.b;
+  for (let i = start, end = start + count; i < end; i++) {
+    const p = i * 3;
+    colors[p] = r; colors[p + 1] = g; colors[p + 2] = b;
+  }
+  return { start, count };
+}
+
+/**
+ * 改一格的颜色，并**只把这一小段**标为脏。
+ *
+ * 每次只改 6~7 个顶点（约 84 字节），而不是重传整个 0.86 MB 的颜色缓冲 ——
+ * 这是「高亮不新建 Mesh」能做到近乎零成本的关键。
+ * three r159+ 的 BufferAttribute.addUpdateRange() 会把它变成一次
+ * gl.bufferSubData 区间上传（WebGL2 路径），代价可以忽略。
+ */
+function repaintTile(ti) {
+  if (ti < 0 || !gfx.colorAttr) return;
+  const { start, count } = writeTileColor(ti);
+  const attr = gfx.colorAttr;
+  if (typeof attr.addUpdateRange === 'function') attr.addUpdateRange(start * 3, count * 3);
+  attr.needsUpdate = true;   // 没有 addUpdateRange 的老版本 three 会退化成整体上传，依然正确
+}
+
+/**
+ * 整体重着色（换种子、调参、调试筛选群系后调用）。
+ *
+ * 这里刻意走「整段上传」而不是逐格标脏：10242 个区间会让 three 打 1 万多次
+ * bufferSubData，反而比传一次 0.86 MB 慢得多。
+ * ⚠️ 必须先清掉可能残留的区间标记 —— 只要 updateRanges 非空，three 就只上传
+ * 那几个区间，其余改动会被静默吞掉。
+ */
+function repaintAll() {
+  const attr = gfx.colorAttr;
+  if (!attr) return;
+  if (typeof attr.clearUpdateRanges === 'function') attr.clearUpdateRanges();
+  for (let ti = 0; ti < tiles.length; ti++) writeTileColor(ti);
+  attr.needsUpdate = true;
+}
+
+function setHovered(ti) {
+  if (ti === hoveredIndex) return;
+  const prev = hoveredIndex;
+  hoveredIndex = ti;
+  if (prev >= 0) repaintTile(prev);
+  if (ti >= 0) repaintTile(ti);
+  refreshHud();
+}
+
+function setSelected(ti) {
+  if (ti === selectedIndex) return;
+  const prev = selectedIndex;
+  selectedIndex = ti;
+  if (prev >= 0) repaintTile(prev);
+  if (ti >= 0) repaintTile(ti);
+  updateOutline();
+  refreshHud();
+}
+
+function refreshHud() {
+  // 悬停优先显示悬停的那格；鼠标移开后继续显示选中格
+  const ti = hoveredIndex >= 0 ? hoveredIndex : selectedIndex;
+  if (ti < 0) {
+    hudEl.classList.remove('visible');
     return;
   }
-  // OrbitControls 只改了相机的位置与朝向，matrixWorld 要到 render 时才刷新。
-  // 这里主动更新一次，保证拾取结果与当前画面同步（否则快速旋转时会有 1 帧延迟）。
+  updateHud(tiles[ti]);
+  hudState.textContent = selectedIndex === ti ? '已选中' : '悬停';
+  hudEl.classList.add('visible');
+}
+
+/* -------------------------------------------------------------------------
+ * 7.2  选中描边：整颗星球只有 1 个可复用的 LineLoop
+ * ------------------------------------------------------------------------- */
+
+function ensureOutline() {
+  if (gfx.outline) return gfx.outline;
+
+  const geometry = new THREE.BufferGeometry();
+  // 最多 6 个环顶点（六边形）；五边形用 drawRange 只画前 5 个
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6 * 3), 3));
+  const material = new THREE.LineBasicMaterial({
+    // 描边刻意用白色而不是选中色：选中色已经把格子内部染成青蓝，
+    // 同色描边等于没有描边。白色边框才能和群系色、也和选中色都拉开对比。
+    color: 0xffffff, transparent: true, opacity: 0.9, depthTest: true,
+  });
+  const line = new THREE.LineLoop(geometry, material);
+  line.frustumCulled = false;     // 顶点在运行时被替换，交给它自己算包围球反而不划算
+  line.visible = false;
+  line.matrixAutoUpdate = false;
+  line.updateMatrix();
+
+  gfx.outline = line;
+  gfx.outlinePos = geometry.attributes.position;
+  planetGroup.add(line);          // planetGroup 的子对象，随星球一起转
+  return line;
+}
+
+/**
+ * 把描边顶点搬到当前选中的图块上。
+ * 只改坐标、不新建对象 —— 将来放「矿石/出生地标记」也是同一套路。
+ */
+function updateOutline() {
+  const line = ensureOutline();
+
+  if (selectedIndex < 0) {
+    line.visible = false;
+    return;
+  }
+
+  const ti = selectedIndex;
+  const ringStart = gfx.tileVertStart[ti] + 1;        // +1 跳过扇心，取环顶点
+  const ringCount = gfx.tileVertCount[ti] - 1;        // 环顶点个数（5 或 6）
+  const src = gfx.mesh.geometry.attributes.position.array;
+  const dst = gfx.outlinePos.array;
+  const R = 1.004;   // 沿半径略微外扩，避免与球面共面产生 z-fighting
+
+  for (let i = 0; i < ringCount; i++) {
+    const s = (ringStart + i) * 3;
+    dst[i * 3]     = src[s]     * R;
+    dst[i * 3 + 1] = src[s + 1] * R;
+    dst[i * 3 + 2] = src[s + 2] * R;
+  }
+  gfx.outlinePos.needsUpdate = true;
+  line.geometry.setDrawRange(0, ringCount);
+  line.visible = true;
+}
+
+/* -------------------------------------------------------------------------
+ * 7.3  拾取
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 屏幕坐标 → 图块序号（-1 = 没命中）。
+ *
+ * ■ faceIndex → 图块：为什么不能简单用 Math.floor(faceIndex / 6)
+ *   12 个五边形每个只有 5 个三角形，而六边形有 6 个，
+ *   所以「三角形序号 / 6」在五边形之后会整体错位（每遇到一个五边形就错 1）。
+ *   buildPlanetGeometry() 在打包时逐三角形记录了 triToTile，这里直接查表：
+ *   精确、O(1)、天然兼容五边形。
+ *
+ * ■ 性能
+ *   只对 1 个 Mesh 做射线求交；raycaster 会先用几何体包围球快速剔除，
+ *   并且会因为材质是 FrontSide 而跳过背面三角形，实际只测正面约一半。
+ */
+function pickTile(clientX, clientY) {
+  if (!gfx.mesh) return -1;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+  // OrbitControls 只改相机的位置与朝向，matrixWorld 要到 render 时才刷新。
+  // 这里主动更新一次，保证拾取结果与当前画面同步（否则快速旋转时会差 1 帧）。
   camera.updateMatrixWorld();
   raycaster.setFromCamera(pointerNDC, camera);
-  // 只对图块 mesh 做拾取：planetGroup 里将来可能混入描边、光晕等对象，会被误命中
-  const hits = raycaster.intersectObjects(tileMeshes, false);
-  applyHover(hits.length > 0 ? hits[0].object.userData.tile : null);
+
+  const hits = raycaster.intersectObject(gfx.mesh, false);
+  if (hits.length === 0) return -1;
+
+  const faceIndex = hits[0].faceIndex;
+  if (faceIndex === undefined) return -1;
+  const ti = gfx.triToTile[faceIndex];
+  return ti === undefined ? -1 : ti;
 }
 
-function applyHover(tile) {
-  if (tile === hoveredTile) return;
+/* -------------------------------------------------------------------------
+ * 7.4  矿石层：全部矿共用一个 InstancedMesh
+ * ------------------------------------------------------------------------- */
 
-  // 复原上一个图块
-  if (hoveredTile) {
-    hoveredTile.mesh.material.color.copy(hoveredTile.baseColor);
-  }
+const ORE_COLORS = { 1: 0xffd45e, 2: 0xb9c6d4, 3: 0x7fd3a8 };   // 矿种 → 颜色
+const oreTiles = [];        // 有矿的图块序号（业务侧）
+const oreMatrix = new THREE.Matrix4();
+const oreQuat = new THREE.Quaternion();
+const orePos = new THREE.Vector3();
+const oreScale = new THREE.Vector3(1, 1, 1);
+const ORE_UP = new THREE.Vector3(0, 1, 0);
 
-  hoveredTile = tile;
-
-  if (tile) {
-    tmpColor.copy(tile.baseColor).lerp(HIGHLIGHT_COLOR, 0.38);
-    tile.mesh.material.color.copy(tmpColor);
-    updateHud(tile);
-    hudEl.classList.add('visible');
-  } else {
-    hudEl.classList.remove('visible');
-  }
+function createOreLayer() {
+  // 八面体当作矿石图标；一份几何体 + 一份材质，靠 instanceColor 区分矿种
+  const geometry = new THREE.OctahedronGeometry(0.022, 0);
+  const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: false });
+  const inst = new THREE.InstancedMesh(geometry, material, ORE_CAPACITY);
+  inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  inst.count = 0;
+  inst.visible = false;
+  inst.frustumCulled = false;
+  inst.matrixAutoUpdate = false;
+  inst.updateMatrix();
+  gfx.oreLayer = inst;
+  planetGroup.add(inst);
+  return inst;
 }
+
+/** 业务 API：给某格放一份矿（typeId 决定颜色，储量只写进业务数组） */
+function setOre(ti, typeId = 1, amount = 100) {
+  if (!world.ore || ti < 0 || ti >= tiles.length) return;
+  if (world.ore[ti] === 0) oreTiles.push(ti);
+  world.ore[ti] = typeId;
+  world.oreAmount[ti] = amount;
+  syncOreLayer();
+}
+
+function clearOres() {
+  if (world.ore) world.ore.fill(0);
+  oreTiles.length = 0;
+  syncOreLayer();
+}
+
+/** 把业务侧的矿石清单同步到渲染侧。无论多少矿，draw call 只增加 1。 */
+function syncOreLayer() {
+  if (oreTiles.length > ORE_CAPACITY) {
+    console.warn(`[矿石] 超出实例容量 ${ORE_CAPACITY}，多余的不会显示`);
+  }
+  if (!gfx.oreLayer && oreTiles.length === 0) return;
+  const inst = gfx.oreLayer || createOreLayer();
+
+  const n = Math.min(oreTiles.length, ORE_CAPACITY);
+  for (let i = 0; i < n; i++) {
+    const tile = tiles[oreTiles[i]];
+    orePos.copy(tile.center).multiplyScalar(1.02);          // 浮在球面之上一点
+    oreQuat.setFromUnitVectors(ORE_UP, tile.center);         // 让八面体朝外
+    oreMatrix.compose(orePos, oreQuat, oreScale);
+    inst.setMatrixAt(i, oreMatrix);
+    inst.setColorAt(i, scratchColor.setHex(ORE_COLORS[world.ore[oreTiles[i]]] || 0xffd45e));
+  }
+  inst.count = n;
+  inst.instanceMatrix.needsUpdate = true;
+  if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+  inst.visible = n > 0;   // 没有矿时彻底不绘制（连 1 次 draw call 都不花）
+}
+
+/* -------------------------------------------------------------------------
+ * 7.5  事件绑定
+ * ------------------------------------------------------------------------- */
 
 function setupInteraction() {
   const dom = renderer.domElement;
+  let downX = 0, downY = 0, downTime = 0, downId = -1;
 
   dom.addEventListener('pointermove', (ev) => {
-    const rect = dom.getBoundingClientRect();
-    pointerNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-    pointerNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    // 触屏没有「悬停」概念，整条悬停拾取链路直接跳过（省掉触屏上最贵的开销）
+    if (ev.pointerType !== 'mouse') return;
+    lastPointerX = ev.clientX;
+    lastPointerY = ev.clientY;
     pointerInside = true;
-    needsPick = true;      // 真正的拾取合并到动画循环中执行
+    needsPick = true;      // 真正的拾取合并到动画循环里执行
   });
 
   dom.addEventListener('pointerleave', () => {
     pointerInside = false;
     needsPick = true;
   });
+
+  // 触屏与鼠标共用：按下 → 抬起 之间位移足够小才算「点选」，
+  // 否则视为拖动旋转（OrbitControls 在监听同一批事件）。
+  dom.addEventListener('pointerdown', (ev) => {
+    downId = ev.pointerId;
+    downX = ev.clientX;
+    downY = ev.clientY;
+    downTime = performance.now();
+  });
+
+  dom.addEventListener('pointerup', (ev) => {
+    if (ev.pointerId !== downId) return;
+    downId = -1;
+    if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 8) return;   // 拖动
+    if (performance.now() - downTime > 700) return;                       // 长按
+    setSelected(pickTile(ev.clientX, ev.clientY));                        // 点空白 = -1 = 取消选中
+  });
+
+  dom.addEventListener('pointercancel', () => { downId = -1; });
 }
 
 /* =========================================================================
@@ -844,8 +1241,8 @@ function animate() {
   controls.update();
 
   if (needsPick) {
-    updateHover();
     needsPick = false;
+    setHovered(pointerInside ? pickTile(lastPointerX, lastPointerY) : -1);
   }
 
   renderer.render(scene, camera);
@@ -911,6 +1308,51 @@ function runSelfTest(tiles) {
   }
   check('共享顶点为同一引用（无缝隙）', sharedRefs);
 
+  // ---- 合并几何体与 triToTile 映射（渲染架构正确性的核心检查）----
+  if (gfx.mesh) {
+    const geometry = gfx.mesh.geometry;
+    const indexArr = geometry.index.array;
+    const posArr = geometry.attributes.position.array;
+    const colAttr = geometry.attributes.color;
+    const triCount = indexArr.length / 3;
+
+    check('triToTile 长度 = 三角形总数', gfx.triToTile.length === triCount,
+      `${gfx.triToTile.length} / ${triCount}`);
+    check('顶点色属性与位置属性等长', colAttr.array.length === posArr.length,
+      `${colAttr.array.length} / ${posArr.length}`);
+    check('索引用 Uint32（顶点数超过 65535）', indexArr instanceof Uint32Array,
+      indexArr.constructor.name);
+
+    // 每格顶点数 = 边数 + 1（图块内部共享扇心）
+    let vertOK = true, vertBad = -1;
+    for (const t of tiles) {
+      if (gfx.tileVertCount[t.index] !== t.vertexIndices.length + 1) { vertOK = false; vertBad = t.index; break; }
+    }
+    check('每格顶点数 = 边数 + 1（扇心共享）', vertOK, vertOK ? `共省下 ${triCount * 3 - posArr.length / 3} 个顶点` : `图块 ${vertBad}`);
+
+    // 逐三角形校验：三角形 t 的三个顶点必须全部落在 triToTile[t] 的顶点区间内。
+    // 这条通过就说明 faceIndex → 图块 的查表是精确的（含 12 个五边形）。
+    let triOK = true, triBad = -1;
+    for (let t = 0; t < triCount; t++) {
+      const ti = gfx.triToTile[t];
+      const lo = gfx.tileVertStart[ti];
+      const hi = lo + gfx.tileVertCount[ti];
+      const a = indexArr[t * 3], b = indexArr[t * 3 + 1], c = indexArr[t * 3 + 2];
+      if (a < lo || a >= hi || b < lo || b >= hi || c < lo || c >= hi) { triOK = false; triBad = t; break; }
+    }
+    check('triToTile 逐三角形精确（含 12 个五边形）', triOK,
+      triOK ? `${triCount} 个三角形全部正确` : `首个错在三角形 ${triBad}`);
+
+    // 五边形与六边形的三角形数必须分别是 5 与 6
+    let polyOK = true;
+    for (const t of tiles) if (gfx.tileVertCount[t.index] - 1 !== t.vertexIndices.length) polyOK = false;
+    check('三角形与多边形边数一一对应', polyOK);
+
+    let meshCount = 0;
+    scene.traverse((o) => { if (o.isMesh) meshCount++; });
+    check('场景中星球主体仅 1 个 Mesh', meshCount === 1, `实际 ${meshCount} 个 Mesh`);
+  }
+
   // 生物群系统计
   const stats = {};
   for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
@@ -945,7 +1387,7 @@ function init() {
   const mesh = subdivide(ico.vertices, ico.faces, CONFIG.level);      // 细分并投影到单位球面
   const dual = buildDual(mesh.vertices, mesh.faces);                  // { dualPos, polygons }
 
-  const tiles = dual.polygons;
+  tiles = dual.polygons;
   tiles.forEach((tile, i) => { tile.index = i; });
 
   // --- 2. 生成地形数据 ---
@@ -969,44 +1411,51 @@ function init() {
     renderPos = dual.dualPos;
   }
 
-  // --- 4. 构建图块 ---
+  // --- 4. 构建渲染层：全部图块合并成 1 个 Mesh ---
   planetGroup.clear();
-  tileMeshes = [];
+  gfx.oreLayer = null;      // planetGroup.clear() 之后旧的引用已失效
+  gfx.outline = null;       // 描边也是 planetGroup 的子对象，同样要作废
+  gfx.outlinePos = null;
 
   for (const tile of tiles) {
-    // 4.1 拓扑索引 → 渲染坐标。多个图块会共享同一批 Vector3 实例，故共享边坐标完全一致
+    // 4.1 拓扑索引 → 渲染坐标。多个图块共享同一批 Vector3 实例，故共享边坐标完全一致
     tile.vertices = tile.vertexIndices.map((i) => renderPos[i]);
 
     let sumR = 0;
     for (const v of tile.vertices) sumR += v.length();
     tile.avgRadius = sumR / tile.vertices.length;
 
-    // 4.2 几何体 + 独立材质。
-    //     必须为每个图块 new 一个材质，禁止按 biome 缓存共享，
-    //     否则悬停高亮会污染所有同色图块。
-    const geometry = buildTileGeometry(tile);
-    const material = new THREE.MeshBasicMaterial({
-      color: BIOME_COLOR[tile.biome],
-      side: THREE.DoubleSide,   // 防御性措施：环序实际已自洽
-    });
-
-    const tileMesh = new THREE.Mesh(geometry, material);
-    tileMesh.userData.tile = tile;
-
-    // 图块的位置完全由几何体的顶点坐标决定，mesh 自身永不移动。
-    // 关掉矩阵自动更新，可省去每帧 N 次（level=4 时 2562 次）无意义的本地矩阵重算。
-    // 注意：若将来需要单独移动某个图块，必须把 matrixAutoUpdate 改回 true。
-    tileMesh.matrixAutoUpdate = false;
-    tileMesh.updateMatrix();
-
-    tile.mesh = tileMesh;
-    tile.baseColor = new THREE.Color(BIOME_COLOR[tile.biome]);   // 悬停复原用，必须在此初始化
-
-    tileMeshes.push(tileMesh);
-    planetGroup.add(tileMesh);
+    // 4.2 群系本色（线性空间）。高亮/选中时以它为基准做瞬时提亮
+    tile.baseColor = new THREE.Color(BIOME_COLOR[tile.biome]);
   }
 
-  // --- 5. 交互与循环 ---
+  // 4.3 一次性打包成单一几何体。返回的映射表是「渲染 → 业务」唯一的桥
+  const packed = buildPlanetGeometry(tiles);
+  gfx.triToTile = packed.triToTile;
+  gfx.tileVertStart = packed.tileVertStart;
+  gfx.tileVertCount = packed.tileVertCount;
+  gfx.colors = packed.colors;
+  gfx.colorAttr = packed.geometry.attributes.color;
+
+  // 4.4 唯一的一份材质。顶点色负责表达群系，因此**不需要**按群系拆分材质。
+  //     side 用 FrontSide：环序已由 buildDual 保证正面朝外，背面永远被自身遮住，
+  //     剔除背面既省填充率，也让射线拾取少测一半三角形。
+  const planetMaterial = new THREE.MeshBasicMaterial({
+    vertexColors: true,       // 颜色全部来自几何体的 color 属性
+    side: THREE.FrontSide,
+  });
+
+  gfx.mesh = new THREE.Mesh(packed.geometry, planetMaterial);
+  gfx.mesh.matrixAutoUpdate = false;   // 几何体坐标已在世界空间里，mesh 自身永不移动
+  gfx.mesh.updateMatrix();
+  planetGroup.add(gfx.mesh);
+
+  // --- 5. 业务数据层 ---
+  world.ore = new Int8Array(tiles.length);
+  world.oreAmount = new Uint16Array(tiles.length);
+  world.owner = new Int16Array(tiles.length).fill(-1);
+
+  // --- 6. 交互与循环 ---
   setupInteraction();
   buildLegend();
 
@@ -1018,34 +1467,97 @@ function init() {
   if (loadingEl) loadingEl.remove();
   window.__planetReady = true;
 
+  const drawCalls = renderer.info.render.calls;
   console.log(
     `%c星球生成完毕：level=${CONFIG.level}，图块 ${tiles.length} 个，` +
     `其中五边形 ${tiles.filter((t) => t.vertexIndices.length === 5).length} 个。`,
     'color:#6cf',
   );
+  console.log(
+    `%c渲染架构：1 个 Mesh（合并几何体）· 顶点 ${packed.vertexCount} 个 · ` +
+    `三角形 ${packed.triCount} 个 · draw call ${drawCalls} 次/帧`,
+    'color:#6cf;font-weight:bold',
+  );
   console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
 
-  // --- 6. 调参用出口 ---
+  // --- 7. 调参 / 集成出口 ---
   // 河流 / 气候 / 分类都是纯函数（只依赖 CONFIG 与图块数据），所以改完 CONFIG 直接调
-  // __PLANET__.refresh() 就能看到新结果，不必重建网格、也不必重载页面。
-  // 调参时每次重载页面要 ~1 分钟（level 5 + 10242 个 Mesh），这个出口能省掉绝大部分等待。
-  // 对正常浏览无任何影响，只是把内部函数挂到 window 上。
+  // __PLANET__.refresh() 就能看到新结果，不必重建几何体、也不必重载页面。
+  // 调参时每次重载页面要十几秒，这个出口能省掉绝大部分等待。
   window.__PLANET__ = {
-    CONFIG, BIOME, BIOME_COLOR, BIOME_LABEL, tiles,
-    computeClimate, classifyBiome, latitudinalMoisture, isRiver,
-    /** 重跑「河流 → 气候 → 群系 → 颜色」，返回新的群系计数 */
+    /* 配置与常量表 */
+    CONFIG, BIOME, BIOME_COLOR, BIOME_LABEL,
+
+    /* 业务数据层（纯 JS，渲染层不感知） */
+    tiles, world,
+
+    /* 渲染层句柄 */
+    scene, camera, renderer, controls, planetGroup,
+    gfx,
+    get planetMesh() { return gfx.mesh; },
+
+    /* 渲染 → 业务 的映射 */
+    triToTile: gfx.triToTile,
+    tileVertStart: gfx.tileVertStart,
+    tileVertCount: gfx.tileVertCount,
+
+    /* 拾取与选中 */
+    pickTile,
+    select: setSelected,
+    setHovered,
+    getSelected: () => selectedIndex,
+    getHovered: () => hoveredIndex,
+
+    /* 矿石层（演示"加资源不增加 draw call"的套路） */
+    setOre, clearOres,
+
+    /* 顶点色 */
+    repaintTile, repaintAll,
+
+    /**
+     * 调试：只显示指定的群系，其余格子调成背景色（截图对比用）。
+     * 传 null / 空数组恢复全部。因为只有 1 个 Mesh，这里靠改顶点色实现，
+     * draw call 依旧是 1。
+     */
+    setVisibleBiomes(list) {
+      const keep = list && list.length ? new Set(list) : null;
+      for (const tile of tiles) {
+        // 被筛掉的格子刷成背景色。用 copy 而不是 getHex/setHex 往返，避免色彩空间来回转换
+        if (keep && !keep.has(tile.biome)) tile.baseColor.copy(scene.background);
+        else tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
+      }
+      repaintAll();
+      return keep ? keep.size : 'all';
+    },
+
+    /** 重跑「河流 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
     refresh() {
       const stats = {};
       for (const tile of tiles) {
         tile.river = isRiver(tile.center, tile.elevation);
         computeClimate(tile);
         tile.biome = classifyBiome(tile);
-        const hex = BIOME_COLOR[tile.biome];
-        tile.baseColor.setHex(hex);
-        tile.mesh.material.color.setHex(hex);
+        tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
         stats[tile.biome] = (stats[tile.biome] || 0) + 1;
       }
+      repaintAll();
       return stats;
+    },
+
+    /* 性能计数（验收用） */
+    stats() {
+      const info = renderer.info;
+      let meshCount = 0, objectCount = 0;
+      scene.traverse((o) => { objectCount++; if (o.isMesh) meshCount++; });
+      return {
+        drawCalls: info.render.calls,
+        triangles: info.render.triangles,
+        geometries: info.memory.geometries,
+        textures: info.memory.textures,
+        programs: info.programs ? info.programs.length : -1,
+        meshCount, objectCount,
+        tileCount: tiles.length,
+      };
     },
   };
 }

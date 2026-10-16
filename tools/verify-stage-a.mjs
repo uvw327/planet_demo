@@ -213,9 +213,11 @@ await setRot(37, 0); await shot('subtropic-front');   // 把副热带干旱带�
 await setRot(90, 0); await shot('north');
 await setRot(-90, 0); await shot('south');
 
-await evaluate(`(() => { const ts = window.__PLANET__.tiles; for (const t of ts) t.mesh.visible = (t.biome === 'desert' || t.biome === 'grassland'); return 1; })()`);
+// 只留沙漠 + 草原。重构后整颗星球只有 1 个 Mesh，不能再逐格切 visible，
+// 改为通过顶点色把其余群系刷成背景色（draw call 仍是 1）。
+await evaluate(`window.__PLANET__.setVisibleBiomes(['desert','grassland'])`);
 await setRot(0, 0); await sleep(400); await shot('desert-grassland');
-await evaluate(`(() => { const ts = window.__PLANET__.tiles; for (const t of ts) t.mesh.visible = true; return 1; })()`);
+await evaluate(`window.__PLANET__.setVisibleBiomes(null)`);
 await sleep(800);
 
 await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 640, y: 400, deltaX: 0, deltaY: -500 });

@@ -373,27 +373,29 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 
 ### P2-3 六边形网格可见 + "每格一个 Mesh" 架构撞到天花板
 
-- **状态**：⬜ 未修复
-- **症状**：level 5 在 1280×800 下仍能数出格子（沙漠黄区尤其明显）；`v1-a0.png` 可清楚看到蜂巢。
-- **证据**：截图 `v1-a0.png` / `v1-close.png`；代码注释自述 level 5 = 10242 draw call。
-- **代码位置**：`init()` 中逐图块 `new THREE.Mesh(geometry, material)`（`:963`）；`CONFIG.level: 5`（`:138`）。
-- **约束**：要做到"看不出网格"需 level 6（40962 格），而"一图块一 Mesh"在 level 5 已是 10242 个 draw call，level 6 会直接崩。
+- **状态**：🟡 **架构部分已修复**（draw call 10243 → 2）；"网格感"本身待 §6 决策 D4
+- **症状 A（架构）**：每格一个 Mesh → draw call = 图块数，手机端必然卡死。
+- **症状 B（网格感）**：level 5 在 1280×800 下仍能数出格子（沙漠黄区尤其明显）。
+- **证据**：截图 `v1-a0.png` / `v1-close.png`；`tools/out/v1-render.json` 里 hook WebGL 得到的真实 draw call = 10243。
+- **代码位置**：`init()` 中逐图块 `new THREE.Mesh(geometry, material)`（：963）；`CONFIG.level: 5`（：138）。
 - **修复方向**：
   1. **短期**：把同色图块合并成一个大 `BufferGeometry`（顶点色 + 索引），draw call 从 10242 降到 1–12（按群系分组合并）；
   2. **长期**：合并成单一 geometry + 逐顶点色，此时 level 6 才可行。
-  - ⚠️ 注意：合并会破坏"悬停高亮用材质色"的做法（v1 是每格独立材质），需要改成"独立描边对象"或"逐格重传颜色"。
+- **实测（架构部分，已修复）**：全部图块合并成 **1 个 Mesh + 1 份材质**，draw call **10243 → 2**（星球 1 + 星空 1）；放矿后 4。拾取改 `faceIndex → triToTile`，往返抽样 **92/92 = 100%**；高亮改区间顶点色上传（72~84 字节/次），像素级验证通过。详见 `docs/render-architecture.md`。
 - **验收标准**：level 5 下 draw call ≤ 20；或 level 6 下帧率 ≥ 30 fps；悬停高亮仍可用。
-- **实测（修复后）**：待填
+  → draw call 2 ✅；悬停高亮仍可用 ✅；level 6 现在是**纯配置**（`CONFIG.level = 6`），但仍需真机帧率确认，故本项标 🟡 而非 ✅。
+- **症状 B（网格感）**：合并**不会**自动消除网格感（合并只解决 draw call）。是否要消除网格感仍是 §6 决策 D4，未动。
 
 ---
 
 ### P2-4 相邻六边形之间存在细暗缝
 
-- **状态**：⬜ 未修复
+- **状态**：🟡 合并后**不再观察到**（需你目视确认）；观感本身待 §6 决策 D4
 - **症状**：相邻图块共享顶点坐标（v1 已保证无缝隙），但**像素级抗锯齿**仍在边界产生混合，背景透出 → 出现细暗线，观感像"瓷砖勾缝"。
 - **证据**：截图 `v1-a0.png` 沙漠黄区的蜂巢轮廓。
 - **代码位置**：`buildTileGeometry()` 扇心 `center.clone() × avgRadius`；逐图块独立几何 + `DoubleSide`。
 - **说明**：这个 artifact 意外地"帮忙"了（给了网格线），但它不是设计，合并成单一 geometry 后会自动消失。**需要你确认是要保留这种"网格感"还是要消除**（见 §6 决策 D4）。
+- **实测（重构后）**：合并几何体 + `FrontSide`（v1 是 `DoubleSide`）之后，`docs/render-shots/render-close-selected.png` 的近景里相邻格边界是干净的、看不到暗缝——边界像素现在混合的是相邻格的不透明颜色，而不是透出背景。`seamFree: true` 也确认了公共边坐标逐位一致（无几何缝隙）。
 - **验收标准**：待决策后填。
 
 ---
@@ -563,6 +565,15 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 | `tools/verify-stage-a.mjs` | 阶段 A 验收脚本（实机取数 + 截图，`node tools/verify-stage-a.mjs`） |
 | `tools/lab-climate.mjs` | 调参实验室（加载一次页面，在页面内扫 `CONFIG` 组合，`node tools/lab-climate.mjs`） |
 | `tools/README.md` | 脚本环境要求与用法 |
+| `docs/render-shots/render-selected-center.png` | **重构后**选中状态（正对相机，青色提亮 + 白色描边） |
+| `docs/render-shots/render-close-selected.png` | **重构后**近景 —— 看 FrontSide 有无空洞、每格是否仍是纯色 |
+| `docs/render-shots/render-ui-hover.png` | **重构后**默认视角 + 图例 + 悬停 HUD |
+| `docs/render-shots/render-desert-grassland.png` | **重构后**只留沙漠 + 草原（顶点色筛选，draw call 仍为 1） |
+| `docs/render-shots/render-ore-markers.png` | **重构后**矿石层（40 份矿，1 个 InstancedMesh） |
+| `docs/render-shots/pixel-diff-before.png` / `-after.png` | **像素级证明**的原始裁剪图（选中前 / 选中后，80×80） |
+| `tools/verify-render.mjs` | 渲染架构验收脚本（hook WebGL 数真实 draw call + 功能断言 + 截图，`node tools/verify-render.mjs merged`） |
+| `tools/out/merged-render.json` / `tools/out/v1-render.json` | 同环境 A/B 的全部原始数据（`docs/render-architecture.md` 所有数字的来源；`tools/out/` 不入库） |
+| `docs/render-architecture.md` | **渲染架构重构施工单**：方案、`triToTile` 建立方式、取舍理由、验收对照 |
 
 ---
 
@@ -588,3 +599,33 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 **改掉了一条错的目标**：原 M11"相邻纬度桶平均湿度最大跳变 ≤ 0.15"被实测判定为错——三圈环流的纬向剖面本来就该是 V 形，跳变大才是对的。已改写为"全陆地湿度直方图最大 bin 占比 ≤ 30%"。
 
 **回退方式**：`archive/v1-biome-globe.html` 是阶段 A 之前的基线快照，逐字节未动。要回到起点只需 `Copy-Item archive/v1-biome-globe.html index.html -Force`。阶段 A 本身的改动集中在 4 个位置（上表 #1–#5），全部可以用 `git revert <阶段 A 提交>` 干净回滚。
+
+### 渲染架构重构 —— 干掉 draw call 爆炸｜2026-10-16
+
+**目标**：手机端卡顿的根因是"每帧 draw call 数 = 图块数"，不是面数。把 10242 个 Mesh 合并成 1 个。
+
+**这份改动只动渲染层与交互层：群系分布、气候、河流一行未动**，阶段 A 的全部结论依然成立。
+
+| # | 位置 | 改前 → 改后 |
+| --- | --- | --- |
+| 1 | 几何构建 | `buildTileGeometry(tile)`（逐格一个几何体）→ `buildPlanetGeometry(tiles)`（一次性合并 + 返回 `triToTile` 映射表） |
+| 2 | 材质 | 10242 份 `MeshBasicMaterial`（每格独立材质）→ **1 份** `vertexColors: true` 的材质 |
+| 3 | `side` | `DoubleSide` → `FrontSide`（环序自洽，省一半填充率 + 拾取少测一半三角形） |
+| 4 | 拾取 | `intersectObjects(tileMeshes)` → `intersectObject(唯一 Mesh)` + `triToTile[faceIndex]` |
+| 5 | 高亮 | 改 `mesh.material.color` → 改顶点色的一个区间 + `addUpdateRange()` 区间上传（72~84 字节/次） |
+| 6 | 选中 | 无 → 顶点色提亮 + 1 个全局复用的 `LineLoop` 描边（白色） |
+| 7 | 新增 | 矿石层 `InstancedMesh`（懒创建、`instanceColor` 分矿种、无矿时不绘制）+ 业务侧 `world{}` 数组 |
+| 8 | 新增 | `CONFIG.maxPixelRatio / antialias / hoverTint / selectionTint / selectionColor`；`stencil: false`；`shadowMap` 显式关闭 |
+| 9 | 交互 | 触屏短路悬停链路；按下→抬起位移 ≤ 8 px 且 ≤ 700 ms 才算点选；点空白取消选中 |
+| 10 | 修 bug | `#hint` 补 `pointer-events: none`（原先挡住左下角画布，那一带点不中图块） |
+| 11 | 自测 | `runSelfTest()` 增加 6 项渲染架构断言（`triToTile` 逐三角形精确、无缝隙、扇心在球面、法线单位长、单 Mesh 等） |
+
+**结果**：draw call **10243 → 2**（同一环境 hook WebGL 实测）；帧间隔 p50 116.7 ms → 50.0 ms；
+拾取往返 92/92 = 100%；选中像素级验证 182 px 变化且只影响被选中那一格。
+**完整数据、`triToTile` 的建立方式与全部取舍理由见 `docs/render-architecture.md`。**
+
+**未完成的诚实说明**：手机真机帧率未验（headless 只有 SwiftShader 软件光栅化器，帧时间不可比）；
+"六边形网格感"（P2-3 症状 B）与色板明度（P2-5）仍需 §6 的 D4 / 阶段 D 决策。
+
+**回退方式**：`git revert <本次提交>` 即可（全部改动集中在 `index.html`）。
+回 v1 原始基线仍是 `Copy-Item archive/v1-biome-globe.html index.html -Force`。
