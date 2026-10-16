@@ -97,6 +97,7 @@
   <div class="row"><span class="k">纬&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lat">-</span></div>
   <div class="row"><span class="k">经&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lon">-</span></div>
   <div class="row"><span class="k">水&nbsp;&nbsp;&nbsp;&nbsp;系</span><span class="v" id="hud-hydro">-</span></div>
+  <div class="row"><span class="k">造山带</span><span class="v" id="hud-orogeny">-</span></div>
   <div class="row"><span class="k">图&nbsp;&nbsp;&nbsp;&nbsp;块</span><span class="v" id="hud-id">-</span></div>
   <div class="row"><span class="k">状&nbsp;&nbsp;&nbsp;&nbsp;态</span><span class="v" id="hud-state">-</span></div>
 </div>
@@ -215,7 +216,36 @@ const CONFIG = {
   //   **精确等于** landFraction × 图块数。为什么非要精确：陆地占比是所有群系占比的分母
   //   （"雪峰 ≤ 12%" 是"占陆地"），分母飘一点，下游所有目标数字都要重新推导。
   landFraction: 0.38,     // 目标陆地占比：0.38 约为地球的 1.3 倍，且能自然裂成数块大陆
-  elevationSpread: 0.30,  // 海拔自海平面向上的展开幅度：越大 → 陆地越"高"、高山雪峰越多
+  // 基础海拔（造山带之外的那部分）自海平面向上的展开幅度。
+  // ★ 阶段 D 把它从 0.30 降到 0.20：FBM 只负责"大陆隆起多少"，
+  //   "高山"改由造山带（见下）负责。这样 FBM 的高值区不再顶到 1.0，
+  //   否则那些被 clamp 到 1.0 的格子会因为直减率变成赤道上的"针叶林高原"。
+  elevationSpread: 0.20,
+
+  /* --- 造山带（阶段 D：山脉成带 + 真实雪线）--- */
+  // 旧做法把「山脉」当成海拔阈值的副作用，切出来的是各向同性的 FBM 团块 ——
+  // 圆滚滚的灰白斑，占陆地 24%，没有走向、没有山脊、与纬度无关（P0-3）。
+  // 新做法：显式的「造山带场」= 球面上若干条大圆弧段，按到弧的球面角距平滑衰减，
+  // 且**弧的中点必须落在大陆内部**（否则重掷）—— 山带因此长在大陆上、成链成带。
+  //   → 山脉成链/成带（验收要求最小包围盒长宽比 ≥ 2.5；实测加权 6.83，v1 口径是 1.74）；
+  //   → 海拔在带内被抬起，所以「山 = 高」这条物理关系仍然成立，
+  //     H2/H3 的水文（分水岭、河源）可以直接用 orogeny 与 elevation。
+  orogenyBands: 5,        // 造山带条数（第 1 条固定纵贯赤道，保底「赤道雪峰」）；
+                          // 5 条是实测的甜点：再多就会在大陆内部互相交汇，把长条揉成"构造结团块"
+  orogenyWidth: 6.0,      // 造山带半宽（度）：到弧中心线角距超过它 → 强度归零
+  orogenyMinLen: 50,      // 弧长下限（度）：太长会互相交汇成「构造结团块」，实测 50~110 的带形最纯
+  orogenyMaxLen: 110,     // 弧长上限（度）
+  orogenyPeakMin: 0.55,   // 单条带的峰值强度下限
+  orogenyPeakMax: 1.00,   // 峰值强度上限
+  orogenyMountain: 0.35,  // 造山带强度 ≥ 此值 → 山脉（同时决定山脉带宽与 M6 占比）
+  orogenyGain: 0.50,      // 造山带对陆地的抬升量：elevation += gain × orogeny
+  // 山带「种在大陆上」的门槛：弧中点的 z 必须高于「海平面锚点 + 此值」。
+  // z 是标准化后的原始高度，spread=0.20 时 0.5 ≈ 海拔 0.10 —— 即要求中点不只是陆地，
+  // 而是**大陆内部**（海岸带不算）。太小 → 山带贴着海岸被截短；太大 → 候选点不够、凑不齐条数。
+  orogenyLandZ: 0.50,
+  // 雪线温度：山地地面温度低于此值 → 雪峰。因为温度已含海拔直减，
+  // 雪线自然随纬度升降（赤道要 0.93 以上才见雪、中纬 0.55 以上就白、极地山地常年覆雪）。
+  tempSnow: 0.55,
 
   /* --- 河流（水文）--- */
   // ★ H1：河流已从「群系」改为「覆盖层」，旧的三个参数（riverScale / riverWidth /
@@ -303,9 +333,14 @@ const BIOME_LABEL = {
   [BIOME.ICE]:        '冰原',
 };
 
-/** 高度阶梯阈值（高山与低地气候无关，单独处理） */
-const SNOW_LEVEL     = 0.80;
-const MOUNTAIN_LEVEL = 0.65;
+/**
+ * 角度单位（造山带参数用「度」书写更直观，内部一律用弧度）。
+ * ★ 阶段 D 删掉了 `SNOW_LEVEL` / `MOUNTAIN_LEVEL`：
+ *   雪线改由**温度**决定（`CONFIG.tempSnow`），
+ *   山脉改由**造山带场**决定（`CONFIG.orogenyMountain`），
+ *   两者都不再是"全局海拔阈值"。
+ */
+const DEG = Math.PI / 180;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clamp   = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -365,6 +400,184 @@ function fbm3(p, octaves, lacunarity, gain, offset) {
     freq *= lacunarity;
   }
   return sum / norm;
+}
+
+/* =========================================================================
+ * §2.5  造山带（阶段 D）
+ * -------------------------------------------------------------------------
+ * 山脉不是「海拔高」的同义词 —— 海拔高是**结果**，构造运动（造山带）才是**原因**。
+ * 旧做法直接用全局海拔阈值去切 FBM，切出来的是各向同性的圆团块（P0-3）；
+ * 这里改成显式的「球面大圆弧段 + 球面胶囊距离衰减」，让山脉成链/成带。
+ *
+ * 关键取舍：造山带**抬升的是海拔**（而不只是一个分类标记）。
+ * 于是「山 = 高」的物理关系仍然成立，温度直减、将来的水文分水岭与河源
+ * 都能直接用 `tile.elevation` / `tile.orogeny`，不需要第二套高度数据。
+ * ========================================================================= */
+
+/**
+ * 某方向上的「原始高度」（大陆噪声 + 细节噪声，未做 z-score 标准化）。
+ *
+ * 抽成函数是因为它有两个用户：① `computeElevations()` 的第一遍采样；
+ * ② 造山带落点判定 —— 山带要种在大陆上，就先得能问"这个方向是不是大陆"。
+ */
+function rawHeightAt(c) {
+  const pC = c.clone().multiplyScalar(CONFIG.continentScale);
+  const pD = c.clone().multiplyScalar(CONFIG.detailScale);
+  const continent01 = fbm3(pC, CONFIG.continentOctaves, 2.0, 0.5, OFFSET_A) * 0.5 + 0.5;
+  const detail01    = fbm3(pD, CONFIG.detailOctaves,    2.0, 0.5, OFFSET_B) * 0.5 + 0.5;
+  return CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
+}
+
+/**
+ * 由两个端点造出一条造山带（预计算法向与切向，采样时只做常数级运算）。
+ *
+ *   a、b   弧的两个端点（单位向量）；theta = 弧长（弧度，∈ (0, π]）
+ *   n      弧所在大圆的法向（= a × b），用于算「到弧的球面角距」
+ *   s      弧平面内与 a 正交的切向（= n × a），用于算「沿弧参数」
+ *   peak   本条带的峰值强度
+ */
+function makeOrogenyBand(a, b, peak) {
+  const n = new THREE.Vector3().crossVectors(a, b).normalize();
+  const s = new THREE.Vector3().crossVectors(n, a).normalize();
+  const theta = Math.acos(clamp(a.dot(b), -1, 1));
+  return { a, b, n, s, theta, peak };
+}
+
+/**
+ * 构造造山带列表。**可复现**：用独立种子（`seed ^ 0x9E3779B9`）的 rng，
+ * 绝不碰主 rng 序列 —— 主序列一旦被挪动，温度/湿度扰动就会变（H1 踩过这个坑）。
+ *
+ * `isCore(dir)` 由调用方给出（"这里是不是大陆内部"）：
+ *  - 随机带要求**弧的中点**必须是大陆内部，否则重掷；
+ *  - 第 1 条保底带在若干条经线里挑"赤道附近最像大陆"的那条。
+ * 陆上那段因而是连续的长条 —— 横跨大洋的"短段山"自然消失。
+ *
+ * 为什么第 1 条固定纵贯赤道：§2 第 3 条「赤道高山有雪峰」是**硬红线**，
+ * 靠随机撒带"碰巧"覆盖低纬并不可靠，所以直接用经向带保底
+ * （类似安第斯山 / 东非大裂谷这种纵贯南北的造山带）。
+ */
+function buildOrogenyBands(isCore) {
+  const random = mulberry32(CONFIG.seed ^ 0x9E3779B9);
+  const randDir = () => {
+    const u = random() * 2 - 1, th = random() * Math.PI * 2, r = Math.sqrt(1 - u * u);
+    return new THREE.Vector3(r * Math.cos(th), u, r * Math.sin(th));
+  };
+  const randLen = () => clamp(
+    (CONFIG.orogenyMinLen + random() * (CONFIG.orogenyMaxLen - CONFIG.orogenyMinLen)) * DEG,
+    1 * DEG, Math.PI * 0.98,
+  );
+  const randPeak = () => CONFIG.orogenyPeakMin
+    + random() * Math.max(0, CONFIG.orogenyPeakMax - CONFIG.orogenyPeakMin);
+
+  /** 经度 lon、纬度 lat（弧度）处的方向 */
+  const dirAt = (lon, lat) => new THREE.Vector3(
+    Math.cos(lat) * Math.cos(lon), Math.sin(lat), Math.cos(lat) * Math.sin(lon),
+  );
+
+  const bands = [];
+
+  // ① 保底：纵贯赤道的经向带。在 24 条经线里挑"赤道附近陆地最多"的一条，
+  //    赤道点本身是大陆内部的候选额外加权 —— 保证低纬一定有一座够高的山。
+  {
+    let bestLon = 0, bestScore = -Infinity;
+    for (let k = 0; k < 24; k++) {
+      const lon = (k / 24) * Math.PI * 2 + random() * 0.08;
+      let score = 0;
+      for (let s = -0.4; s <= 0.401; s += 0.05) {
+        if (isCore(dirAt(lon, s))) score += (Math.abs(s) < 0.05 ? 3 : 1);
+      }
+      if (score > bestScore) { bestScore = score; bestLon = lon; }
+    }
+    const half = randLen() * 0.5;
+    bands.push(makeOrogenyBand(dirAt(bestLon, -half), dirAt(bestLon, half), randPeak()));
+  }
+
+  // ② 其余：随机方向 + 随机弧长，但**弧中点必须在大陆内部**
+  let guard = 0;
+  while (bands.length < CONFIG.orogenyBands && guard++ < 600) {
+    const a = randDir();
+    const theta = randLen();
+    // 在与 a 正交的随机方向上前进 theta（球面测地线推进）
+    const axis = Math.abs(a.y) < 0.9
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0);
+    const t1 = new THREE.Vector3().crossVectors(a, axis).normalize();
+    const t2 = new THREE.Vector3().crossVectors(a, t1).normalize();
+    const phi = random() * Math.PI * 2;
+    const dir = t1.multiplyScalar(Math.cos(phi)).addScaledVector(t2, Math.sin(phi)).normalize();
+    const b = a.clone().multiplyScalar(Math.cos(theta)).addScaledVector(dir, Math.sin(theta)).normalize();
+    const mid = a.clone().add(b).normalize();
+    if (!isCore(mid)) continue;                       // 中点不在大陆上 → 重掷
+    bands.push(makeOrogenyBand(a, b, randPeak()));
+  }
+  return bands;
+}
+
+/**
+ * 造山带列表缓存。
+ *
+ * 缓存键 = 所有会影响**落点**的参数（地形 + 造山带）。页面内改这些参数后调
+ * `refresh()` 会自动重建，所以工具 `tools/lab-orogeny.mjs` 能在**一次页面加载**
+ * 里扫几十组（只有造山带参数会触发 `buildOrogenyBands`，其余只重跑采样）。
+ */
+let _orogenyBands = null, _orogenyBandsKey = '';
+function getOrogenyBands(isCore) {
+  const key = [CONFIG.seed, CONFIG.landFraction,
+    CONFIG.continentScale, CONFIG.continentOctaves, CONFIG.continentWeight,
+    CONFIG.detailScale, CONFIG.detailOctaves,
+    CONFIG.orogenyBands, CONFIG.orogenyMinLen, CONFIG.orogenyMaxLen,
+    CONFIG.orogenyPeakMin, CONFIG.orogenyPeakMax, CONFIG.orogenyLandZ].join('|');
+  if (!_orogenyBands || _orogenyBandsKey !== key) {
+    _orogenyBands = buildOrogenyBands(isCore);
+    _orogenyBandsKey = key;
+  }
+  return _orogenyBands;
+}
+
+/**
+ * 采样造山带强度 ∈ [0, 1]（取所有带的最大值 —— 交汇处就是"构造结"）。
+ *
+ * 做法：把单位球面上的点 p 投到带所在的大圆上，得到
+ *   dCircle —— 到**整条大圆**的角距（用 asin|p·n|，一个点乘就能快筛）
+ *   t       —— 沿弧参数 ∈ [0, 2π)
+ * 落在弧外的部分，用 `hypot(越出的弧长, 垂距)` 近似球面角距（带宽只有几度，
+ * 小角近似足够精确），并按沿弧位置做「端部渐细」，山带两头自然收窄。
+ */
+function sampleOrogeny(p, bands, widthRad) {
+  let best = 0;
+  for (let i = 0; i < bands.length; i++) {
+    const band = bands[i];
+
+    const dotN = p.dot(band.n);
+    const dCircle = Math.asin(Math.min(1, Math.abs(dotN)));
+    if (dCircle >= widthRad) continue;                 // 快筛：连大圆都够不着
+
+    // 切向投影 → 沿弧参数
+    const projX = p.x - band.n.x * dotN;
+    const projY = p.y - band.n.y * dotN;
+    const projZ = p.z - band.n.z * dotN;
+    const plen = Math.sqrt(projX * projX + projY * projY + projZ * projZ);
+    if (plen < 1e-9) continue;                         // p 落在带上"极点"，无切向分量
+    const u = (projX * band.a.x + projY * band.a.y + projZ * band.a.z) / plen;
+    const v = (projX * band.s.x + projY * band.s.y + projZ * band.s.z) / plen;
+    let t = Math.atan2(v, u);
+    if (t < 0) t += Math.PI * 2;
+
+    // 越出端点 → 最近的端点方向
+    const over = t <= band.theta ? 0 : Math.min(t - band.theta, Math.PI * 2 - t);
+    const d = Math.hypot(over, dCircle);
+
+    // 端部渐细：弧的两头把有效半宽收到 45%
+    const tIn = clamp(t, 0, band.theta);
+    const edge = Math.min(tIn, band.theta - tIn) / Math.max(band.theta, 1e-9);
+    const w = widthRad * (0.45 + 0.55 * Math.min(1, edge / 0.18));
+    if (d >= w) continue;
+
+    const k = 1 - d / w;
+    const val = band.peak * k * k * (3 - 2 * k);       // smoothstep
+    if (val > best) best = val;
+  }
+  return best;
 }
 
 /* =========================================================================
@@ -510,10 +723,11 @@ function displacement(elevation) {
 /**
  * 计算所有图块的海拔。
  *
- * 分三步：
+ * 分四步：
  *   1. 用「大陆噪声 + 细节噪声」混合出原始高度（连续、自然）；
  *   2. 对全体样本做 z-score 标准化，得到无量纲的 z；
- *   3. 「分位锚定」：把 z 的第 (1 − landFraction) 分位对齐到海平面，再按 elevationSpread 向上展开。
+ *   3. 「分位锚定」：把 z 的第 (1 − landFraction) 分位对齐到海平面，再按 elevationSpread 向上展开；
+ *   4. 「造山带叠加」（★ 阶段 D）：在**已经是陆地**的格子上按造山带强度抬升。
  *
  * 第 3 步是地基改造的关键。旧写法是 `elevation = elevationCenter + z · spread`，
  * 海平面 0.35 只是在这个分布上随手切一刀 —— 陆地占比
@@ -536,14 +750,7 @@ function computeElevations(tiles) {
   // 1. 原始高度：低频「大陆」噪声（决定大陆形状）+ 高频「细节」噪声（决定海岸线细节）
   let sum = 0, sum2 = 0;
   for (let i = 0; i < n; i++) {
-    const c = tiles[i].center;
-    const pC = c.clone().multiplyScalar(CONFIG.continentScale);
-    const pD = c.clone().multiplyScalar(CONFIG.detailScale);
-
-    const continent01 = fbm3(pC, CONFIG.continentOctaves, 2.0, 0.5, OFFSET_A) * 0.5 + 0.5;
-    const detail01    = fbm3(pD, CONFIG.detailOctaves,    2.0, 0.5, OFFSET_B) * 0.5 + 0.5;
-
-    const raw = CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
+    const raw = rawHeightAt(tiles[i].center);
     z[i] = raw;
     sum += raw; sum2 += raw * raw;
   }
@@ -558,8 +765,30 @@ function computeElevations(tiles) {
   const k = clamp(Math.floor((1 - CONFIG.landFraction) * n), 0, n - 1);
   const zAtSea = sorted[k];
 
+  // 4. 造山带：先算强度，再**只把已经是陆地的格子抬高**
+  //
+  //    ★ 为什么"先锚定、后叠加"（而不是把造山带并进前面的 z 再锚定）：
+  //      锚定保证「陆地格数 ≡ landFraction × n」精确成立；叠加只发生在
+  //      `base > seaLevel` 的格子上，它们只会更高、绝不会被抬成海平面以下。
+  //      于是**海陆边界、陆块结构（M1/M2/M3）逐格不变** ——
+  //      阶段 D 只改「陆地有多高」，不碰「谁是海、谁是陆」。
+  //      海洋格子完全不动，所以海岸线也不会变。
+  //
+  //    ★ 山带「种在大陆上」：isCore() 给出「这里是不是大陆内部」。
+  //      随机撒大圆弧会让山带横跨大洋，陆上只剩一小截 —— 形态上又退回"团块"
+  //      （实测 a=90° 视角一片短段）。要求**弧的中点落在大陆内部**即可根治：
+  //      陆上那一段必然是连续的长条，短段自然消失。
+  const coreZ = zAtSea + CONFIG.orogenyLandZ;
+  const isCore = (dir) => (rawHeightAt(dir) - mean) / std > coreZ;
+  const bands = getOrogenyBands(isCore);
+  const widthRad = CONFIG.orogenyWidth * DEG;
   for (let i = 0; i < n; i++) {
-    tiles[i].elevation = clamp01(CONFIG.seaLevel + (z[i] - zAtSea) * CONFIG.elevationSpread);
+    const base = clamp01(CONFIG.seaLevel + (z[i] - zAtSea) * CONFIG.elevationSpread);
+    const orogeny = sampleOrogeny(tiles[i].center, bands, widthRad);
+    tiles[i].orogeny = orogeny;
+    tiles[i].elevation = base > CONFIG.seaLevel
+      ? clamp01(base + CONFIG.orogenyGain * orogeny)
+      : base;
   }
 }
 
@@ -643,24 +872,28 @@ function computeClimate(tile) {
 }
 
 /**
- * 气候群系分类（★ H1：不再包含河流）。
+ * 气候群系分类（★ 阶段 D：山地改由「造山带场 + 温度雪线」判定）。
  *
  * 判定顺序即优先级：
- *     海洋/海冰 > 高山（雪峰、山脉）> 极地冰原 > 温度带 > 湿度带
+ *     海洋/海冰 > 山地（造山带内的雪峰 / 裸露山脉）> 极地冰原 > 温度带 > 湿度带
  *
  * 说明：
- * - 高山单独处理，因为雪线与纬度无关（赤道上的乞力马扎罗同样有冰川）。
- *   注意：山脉/雪峰在语义上同属「覆盖层」（见 §3.3 的 L2），之所以还留在本函数里，
- *   是因为阶段 D 会把它改造成真正的「成带山脉 + 温度雪线」；图例已先按语义分组。
+ * - 「山脉」不再由**全局海拔阈值**切出来（那样切出来的是各向同性的 FBM 团块，
+ *   没有走向、与纬度无关，见 P0-3），而是看 `orogeny`（造山带强度）→ 山脉成链/成带。
+ * - 雪线**由温度决定**：山地地面温度低于 `tempSnow` 即为雪峰。
+ *   温度里已经含了海拔直减，所以雪线自然随纬度升降 ——
+ *   赤道要海拔 0.93 以上才见雪（乞力马扎罗），中纬度 0.55 以上就白，
+ *   极地山地常年覆雪。这条规则同时满足「雪峰全部温度低于阈值」与
+ *   「赤道雪峰仍存在」两个验收口径。
  * - 温度带负责「冰原 / 苔原 / 针叶林 / 温带 / 热带」的南北分异，
  *   湿度带负责在温带与热带内部区分「沙漠 / 草原 / 森林」。
  *   两者缺一不可 —— 只靠温度做不出沙漠（赤道与副热带温度相近，
  *   差别全部来自降水）。
- * - 河流已移出本函数：它是覆盖层，由 H2 的 computeHydrology() 单独判定，
+ * - 河流已移出本函数（H1）：它是覆盖层，由 H2 的 computeHydrology() 单独判定，
  *   渲染时也不再覆盖底层气候群系色（撒哈拉里的尼罗河，河床下就是沙漠黄）。
  */
 function classifyBiome(tile) {
-  const { elevation, latitude, temperature, moisture } = tile;
+  const { elevation, latitude, temperature, moisture, orogeny } = tile;
   const absLat = Math.abs(latitude);
 
   // 1. 海洋：极地海面结冰
@@ -668,9 +901,10 @@ function classifyBiome(tile) {
     return absLat > CONFIG.seaIceLatitude ? BIOME.SEA_ICE : BIOME.OCEAN;
   }
 
-  // 2. 高山：雪线以上为雪峰，其次为裸露山脉。与纬度无关
-  if (elevation > SNOW_LEVEL) return BIOME.SNOW;
-  if (elevation > MOUNTAIN_LEVEL) return BIOME.MOUNTAIN;
+  // 2. 山地（覆盖层 L2）：造山带内即入山，再按雪线温度分「雪峰 / 裸露山脉」
+  if (orogeny >= CONFIG.orogenyMountain) {
+    return temperature < CONFIG.tempSnow ? BIOME.SNOW : BIOME.MOUNTAIN;
+  }
 
   // 3. 极地冰盖
   if (temperature < CONFIG.tempIce) return BIOME.ICE;
@@ -1014,6 +1248,7 @@ const hudElev = document.getElementById('hud-elev');
 const hudLat = document.getElementById('hud-lat');
 const hudLon = document.getElementById('hud-lon');
 const hudHydro = document.getElementById('hud-hydro');
+const hudOrogeny = document.getElementById('hud-orogeny');
 const hudId = document.getElementById('hud-id');
 const hudState = document.getElementById('hud-state');
 
@@ -1031,6 +1266,10 @@ function updateHud(tile) {
   // 水系（★ H1 占位）：水文数据层在 H2 由 computeHydrology() 填进 world.hydro，
   // 之后这里显示「汇水量 / 是否河道 / 河源 / 河口 / 湖泊 / 内流盆地」。
   hudHydro.textContent = '—';
+  // 造山带强度（★ 阶段 D）：≥ orogenyMountain 即入山，再按温度分雪峰/裸岩。
+  // 调参数时这一行是主要读数（山脉带的位置、宽度、峰值都看它）。
+  hudOrogeny.textContent = `${tile.orogeny.toFixed(3)}${tile.orogeny >= CONFIG.orogenyMountain
+    ? (tile.temperature < CONFIG.tempSnow ? ' · 雪线以上' : ' · 山脉') : ''}`;
   hudId.textContent = `#${tile.index} · ${tile.vertexIndices.length} 边形`;
 }
 
@@ -1064,6 +1303,24 @@ function writeTileColor(ti) {
 }
 
 /**
+ * ★ 阶段 D 修复：全量上传的"待传"标记。
+ *
+ * 陷阱（本文件旧注释只挡住了一半）：只要 `updateRanges` 非空，three 就**只**上传
+ * 那几个区间，其余改动被静默吞掉。原实现只在 `repaintAll()` 里 `clearUpdateRanges()`，
+ * 于是只挡住了「先 repaintTile、后 repaintAll」这一种顺序；
+ * 反过来的「先 repaintAll、后 repaintTile」依然会丢 —— 后者的区间标记会让
+ * 前者的整段上传作废。
+ *
+ * 真实可复现路径：按图例键筛群系（repaintAll）时鼠标正停在球面上，
+ * 下一帧 `needsPick` 命中 → `setHovered()` → `repaintTile()` → 筛选只生效一格。
+ * 截图脚本里这条路更容易命中（中间没有渲染帧），实测整颗星球会"消失"。
+ *
+ * 修法：全量待传期间，`repaintTile()` 不再往 `updateRanges` 里加区间
+ * （颜色数组已经改好了，整段上传会一并带上）；渲染完一帧后清标记。
+ */
+let fullRepaintPending = false;
+
+/**
  * 改一格的颜色，并**只把这一小段**标为脏。
  *
  * 每次只改 6~7 个顶点（约 84 字节），而不是重传整个 0.86 MB 的颜色缓冲 ——
@@ -1075,7 +1332,10 @@ function repaintTile(ti) {
   if (ti < 0 || !gfx.colorAttr) return;
   const { start, count } = writeTileColor(ti);
   const attr = gfx.colorAttr;
-  if (typeof attr.addUpdateRange === 'function') attr.addUpdateRange(start * 3, count * 3);
+  // 已经有整段待传 → 加区间反而会让整段上传作废（见 fullRepaintPending 注释）
+  if (!fullRepaintPending && typeof attr.addUpdateRange === 'function') {
+    attr.addUpdateRange(start * 3, count * 3);
+  }
   attr.needsUpdate = true;   // 没有 addUpdateRange 的老版本 three 会退化成整体上传，依然正确
 }
 
@@ -1084,14 +1344,14 @@ function repaintTile(ti) {
  *
  * 这里刻意走「整段上传」而不是逐格标脏：10242 个区间会让 three 打 1 万多次
  * bufferSubData，反而比传一次 0.86 MB 慢得多。
- * ⚠️ 必须先清掉可能残留的区间标记 —— 只要 updateRanges 非空，three 就只上传
- * 那几个区间，其余改动会被静默吞掉。
+ * ⚠️ 先清掉可能残留的区间标记，并立起 `fullRepaintPending`，直到本帧渲染完成。
  */
 function repaintAll() {
   const attr = gfx.colorAttr;
   if (!attr) return;
   if (typeof attr.clearUpdateRanges === 'function') attr.clearUpdateRanges();
   for (let ti = 0; ti < tiles.length; ti++) writeTileColor(ti);
+  fullRepaintPending = true;
   attr.needsUpdate = true;
 }
 
@@ -1372,6 +1632,8 @@ function animate() {
   }
 
   renderer.render(scene, camera);
+  // 整段颜色缓冲已在本帧传完，标记可以落了（见 fullRepaintPending 注释）
+  fullRepaintPending = false;
 }
 
 function onResize() {
@@ -1500,6 +1762,27 @@ function runSelfTest(tiles) {
   check('图块上无残留的 river 字段', tiles.every((t) => t.river === undefined));
   check('world.hydro 空壳 + 覆盖层显隐 API 已就位',
     'hydro' in world && typeof setVisibleOverlays === 'function' && 'river' in overlayVisible);
+
+  // ---- 造山带与雪线（★ 阶段 D）----
+  check('orogeny ∈ [0,1] 且场非空', tiles.every((t) => t.orogeny >= 0 && t.orogeny <= 1)
+    && Math.max(...tiles.map((t) => t.orogeny)) > 0.5,
+    `峰值 ${Math.max(...tiles.map((t) => t.orogeny)).toFixed(3)}`);
+  {
+    const mtn = tiles.filter((t) => t.biome === 'mountain' || t.biome === 'snow');
+    const snow = tiles.filter((t) => t.biome === 'snow');
+    const land = tiles.filter((t) => t.elevation > CONFIG.seaLevel);
+    const mean = (a) => a.reduce((s, t) => s + t.elevation, 0) / (a.length || 1);
+    check('山地格全部来自造山带（orogeny ≥ 阈值）',
+      mtn.every((t) => t.orogeny >= CONFIG.orogenyMountain), `${mtn.length} 格`);
+    check('雪峰全部在雪线温度以下',
+      snow.every((t) => t.temperature < CONFIG.tempSnow), `${snow.length} 格`);
+    check('赤道雪峰仍存在（§2 第 3 条不得破坏）',
+      snow.some((t) => Math.abs(t.latitude) < 0.3),
+      `|lat|<0.3 的雪峰 ${snow.filter((t) => Math.abs(t.latitude) < 0.3).length} 格`);
+    check('造山带把陆地抬高了（山地平均海拔 > 陆地平均海拔）',
+      mean(mtn) > mean(land) + 0.15,
+      `山地 ${mean(mtn).toFixed(3)} vs 陆地 ${mean(land).toFixed(3)}`);
+  }
 
   // 生物群系统计
   const stats = {};

@@ -23,9 +23,11 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 | `shot-v1.mjs` | 复现 **v1 基线**的截图与全部统计（`docs/v1-shots/` 的来源，默认页面是 `archive/v1-biome-globe.html`） | `node tools/shot-v1.mjs v1` |
 | `verify-render.mjs` | **渲染架构验收**：hook WebGL 数真实 draw call、量帧间隔、拾取往返、高亮像素级比对、矿石层、截图（`docs/render-shots/` 的来源）。同一脚本可跑 v1 做 A/B | `node tools/verify-render.mjs merged`<br>`$env:PLANET_PAGE='…\archive\v1-biome-globe.html'; node tools/verify-render.mjs v1` |
 | `verify-stage-a.mjs` | **阶段 A 验收**：实机取数 + 多视角截图（`docs/stage-a-shots/` 的来源。⚠️ 这批截图是**旧地形**（陆地 62.87%）上的，勿覆盖） | `node tools/verify-stage-a.mjs` |
-| `verify-terrain.mjs` | **地形地基验收**：17 条断言（M1–M5 / 陆块结构 / 阶段 A 红线 / 渲染回归）+ 4 视角截图（`docs/terrain-shots/` 的来源） | `node tools/verify-terrain.mjs` |
+| `verify-terrain.mjs` | **地形地基 + H1 + 阶段 D 验收**：30 条断言（M1–M5 / 陆块结构 / 阶段 A 红线 / 渲染回归 / H1 覆盖层守卫 / 阶段 D 造山带与雪线）+ **v1 口径对照** + 4 视角截图 + 1 张 UI 截图（`docs/terrain-shots/` 的来源） | `node tools/verify-terrain.mjs` |
 | `lab-terrain.mjs` | **地形调参实验室**：通用多轴扫描（`landFraction / continentScale / continentOctaves / detailOctaves / detailScale / continentWeight / elevationSpread`），页面内跑，不重建几何体 | `node tools/lab-terrain.mjs`<br>`node tools/lab-terrain.mjs --lf=0.38 --cs=1.0,1.2 --oct=2 --doct=2,3,4` |
 | `shot-terrain.mjs` | **候选参数对比截图**：同一页面内切参数，每组截 4 个视角（`docs/terrain-shots/candidates/` 的来源） | `node tools/shot-terrain.mjs` |
+| `lab-orogeny.mjs` | **造山带调参实验室**（阶段 D）：扫 `bands / width / mtn / gain / minLen / maxLen / peak* / tempSnow / elevationSpread`，输出山脉占比（M6）、**带形长宽比**（最小外接矩形，面积加权 + 最大分量）、长条覆盖面积占比、赤道雪峰数、红线回归，并自动跑一遍 **v1 口径对照** | `node tools/lab-orogeny.mjs`<br>`node tools/lab-orogeny.mjs --bands=4,5,6 --width=5,6 --mtn=0.35` |
+| `shot-orogeny.mjs` | **阶段 D 截图**：全球 6 视角 + 「只显示山脉/雪峰」4 视角 + 2 个聚焦近景（`docs/orogeny-shots/` 的来源）。内置"背景色格数"探针，防止群系筛选没关掉就截图 | `node tools/shot-orogeny.mjs` |
 | `lab-climate.mjs` | **调参实验室**：加载一次页面，在页面内扫 `CONFIG` 组合，输出对比表 | `node tools/lab-climate.mjs` |
 | `table-check.mjs` | markdown 表格列数自检（改完文档跑一遍） | `node tools/table-check.mjs docs/v1-biome-globe-review.md` |
 
@@ -34,11 +36,19 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 1. **残留的 Chrome 会静默污染结果**。`child.kill()` 在 Windows 上只杀启动器、不杀子进程，
    残留的浏览器会继续占着调试端口并**响应**请求 —— 新脚本可能连到"内存里跑着旧 `index.html`"
    的那个浏览器上，量出一堆假数据（表现非常迷惑：数字自洽但完全不对）。
-   现在 `lab-terrain.mjs` / `shot-terrain.mjs` / `verify-terrain.mjs` 都会：
+   现在 `lab-terrain.mjs` / `shot-terrain.mjs` / `verify-terrain.mjs` / `lab-orogeny.mjs` /
+   `shot-orogeny.mjs` 都会：
    ① 先扫一段随机端口，只挑**没有任何浏览器在监听**的那个；② 连上后**断言页面状态**
-   （`CONFIG.landFraction` 存在、`elevationCenter` 不存在、`refresh()` 走 `recomputeTerrain()`），
+   （`CONFIG.landFraction` 存在、`elevationCenter` 不存在、`riverWidth` 必须不存在、
+   `orogenyBands` / `tempSnow` / `orogenyLandZ` 必须存在、`refresh()` 走 `recomputeTerrain()`），
    不对就直接报错退出。改脚本前先 `Get-Process chrome | Stop-Process -Force`。
 2. **`tool/out/*.json` 不入库**（`.gitignore`），但文档里的每个数字都要能从它复现。
+3. **群系筛选截图后必须 `setVisibleBiomes(null)` 恢复**，否则后续截图全废
+   （`shot-orogeny.mjs` 因此内置了"背景色格数"探针，>3000 就打警告）。
+   另外，`setVisibleBiomes()` 与随后的 `setHovered()` 之间如果没有渲染帧，
+   旧代码会**丢掉整段颜色上传**（只传被悬停的那一格）→ 画面里星球会"消失"。
+   这个 bug 已在阶段 D 修掉（`fullRepaintPending` 标记），但新脚本仍建议
+   "改完颜色 → 等一帧 → 再截图"。
 
 ## 关键前提：`window.__PLANET__`
 
@@ -86,6 +96,15 @@ window.__PLANET__ = {
 ⚠️ **`river` 已不是一个群系**（H1 起改为「覆盖层」）。`BIOME.RIVER` / `CONFIG.riverWidth` /
 `tile.river` 都已删除；按群系筛河流的写法会静默筛掉一切。水文要看 `__PLANET__.hydro()`。
 
+⚠️ **OrbitControls 的滚轮缩放是累积的**。一次会话里连拍多个"远 → 近"镜头时，
+必须在每组镜头开始前把相机距离复位（`camera.position.setLength(初始距离)` +
+`controls.update()`），否则第二组的"-far"截图其实是"-near"视角。
+`shot-orogeny.mjs` 的 `resetZoom()` 就是干这个的（阶段 D 修过一次）。
+
+⚠️ 阶段 D 起 `tile` 多了 **`orogeny`** 字段（造山带强度 ∈ [0,1]），且**山地判据不再是海拔阈值**：
+`orogeny >= CONFIG.orogenyMountain`。雪峰由**温度**判定（`temperature < CONFIG.tempSnow`）。
+`CONFIG.SNOW_LEVEL` / `MOUNTAIN_LEVEL` 已删除 —— 用旧口径量山地会得到完全不同的数。
+
 `archive/v1-biome-globe.html`（v1 基线快照）**没有**这个出口，所以 `shot-v1.mjs` 只能用
 `Array.prototype.push` 钩子从 `Mesh.userData.tile` 反向取图块，并靠对象去重
 （`tileMeshes.push` 与 `planetGroup.add` 会各 push 一次同一个 mesh）。
@@ -98,4 +117,5 @@ window.__PLANET__ = {
 - `verify-stage-a.mjs` → `docs/stage-a-shots/`（旧地形上的历史证据，勿覆盖）
 - `verify-terrain.mjs` → `docs/terrain-shots/`（`terrain-*.png` + `terrain-stats.json`）
 - `shot-terrain.mjs` → `docs/terrain-shots/candidates/`
-- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` → `tools/out/*.json`（`tools/out/` 不入库）
+- `shot-orogeny.mjs` → `docs/orogeny-shots/`（全球 6 + 山地隔离 4 + 聚焦 6）
+- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` → `tools/out/*.json`（`tools/out/` 不入库）

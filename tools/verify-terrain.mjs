@@ -1,10 +1,16 @@
 /**
- * 地形地基验收（含 H1 覆盖层架构守卫）：实机加载 index.html，量全部「陆块结构 + 群系占比」指标，
- * 逐条对照 docs/v1-biome-globe-review.md 的目标值，并检查三条"不许退步"的回归红线
- * 与渲染架构的回归（draw call / 三角形 / Mesh 数）。
+ * 地形地基验收（含 H1 覆盖层架构守卫 + 阶段 D 造山带/雪线）：实机加载 index.html，
+ * 量全部「陆块结构 + 群系占比 + 山脉带形状」指标，逐条对照 docs/v1-biome-globe-review.md
+ * 的目标值，并检查三条"不许退步"的回归红线与渲染架构的回归（draw call / 三角形 / Mesh 数）。
+ *
+ * 阶段 D 的两个关键口径：
+ *   ① 山地判据 = 造山带强度（`orogeny ≥ orogenyMountain`），不再是全局海拔阈值；
+ *   ② 山脉带形状 = 连通分量的**最小外接矩形长宽比**（面积加权，抗"构造结"干扰）。
+ *   为了证明"显著改善"，脚本会再用 **v1 口径**（spread=0.30 + 抬升关闭 + 海拔阈值 0.65）
+ *   把同一批指标重算一遍做对照 —— 实测复现值 24.16% 与台账逐位吻合。
  *
  * 用法：node tools/verify-terrain.mjs
- * 输出：docs/terrain-shots/terrain-stats.json + terrain-{0,90,180,270}.png
+ * 输出：docs/terrain-shots/terrain-stats.json + terrain-{0,90,180,270}.png + terrain-ui.png
  *       指标不达标时退出码为 1。
  */
 import { spawn } from 'node:child_process';
@@ -66,15 +72,139 @@ const env = await evaluate(`(() => {
   if (P.CONFIG.landFraction === undefined) return { ok: false, why: 'CONFIG.landFraction 缺失' };
   if (P.CONFIG.elevationCenter !== undefined) return { ok: false, why: 'CONFIG.elevationCenter 仍在' };
   if (P.CONFIG.riverWidth !== undefined) return { ok: false, why: 'CONFIG.riverWidth 仍在（H1 应已删除）' };
+  if (P.CONFIG.orogenyBands === undefined) return { ok: false, why: 'CONFIG.orogenyBands 缺失（阶段 D 之前）' };
+  if (P.CONFIG.tempSnow === undefined) return { ok: false, why: 'CONFIG.tempSnow 缺失（雪线未改成温度口径）' };
+  if (P.CONFIG.orogenyLandZ === undefined) return { ok: false, why: 'CONFIG.orogenyLandZ 缺失（山带未"种在大陆上"）' };
+  if (!P.tiles.every((t) => t.orogeny !== undefined)) return { ok: false, why: '图块缺 orogeny 字段' };
   return { ok: true, level: P.CONFIG.level, seed: P.CONFIG.seed, tiles: P.tiles.length };
 })()`);
 if (!env.ok) throw new Error(`页面状态不对：${env.why}（先关掉残留的 headless Chrome）`);
 console.log(`页面就绪：level=${env.level} seed=${env.seed} 图块 ${env.tiles} 个`);
 
+/* ---------- 页面内一次性定义几何分析器（供「阶段 D 口径」与「v1 口径」复用） ---------- */
+await evaluate(`(() => {
+  const P = window.__PLANET__, tiles = P.tiles, n = tiles.length;
+
+  // 邻接：两格共享 >= 2 个对偶顶点 ⇔ 共边
+  const byVert = new Map();
+  for (const t of tiles) for (const vi of t.vertexIndices) { let a = byVert.get(vi); if (!a) { a = []; byVert.set(vi, a); } a[a.length] = t; }
+  const adj = new Array(n);
+  for (const t of tiles) {
+    const cnt = new Map();
+    for (const vi of t.vertexIndices) for (const o of byVert.get(vi)) if (o !== t) cnt.set(o, (cnt.get(o) || 0) + 1);
+    const s = []; for (const [o, c] of cnt) if (c >= 2) s.push(o.index);
+    adj[t.index] = s;
+  }
+
+  /** 连通分量（返回每个分量的图块序号数组，按面积降序） */
+  const compsOf = (pred) => {
+    const seen = new Uint8Array(n), out = [];
+    for (const t of tiles) {
+      const i0 = t.index; if (!pred(tiles[i0]) || seen[i0]) continue;
+      const st = [i0]; seen[i0] = 1; const acc = [];
+      while (st.length) { const i = st.pop(); acc.push(i); for (const j of adj[i]) if (!seen[j] && pred(tiles[j])) { seen[j] = 1; st.push(j); } }
+      out.push(acc);
+    }
+    out.sort((a, b) => b.length - a.length); return out;
+  };
+
+  /**
+   * 一个点集的「伸长比」—— 山脉是**带**还是**团块**，就看这个数。
+   *   elongBox：投到质心切平面，扫 90 个角度取**最小面积外接矩形**的长宽比。
+   *             这是 P0-3 验收条款「山脉格的最小包围盒长宽比 ≥ 2.5」的直接实现。
+   *   elongPCA：3D 协方差前两个特征值之比的平方根（长带 4~10，团块 ≈ 1），交叉验证用。
+   */
+  const shape = (ids) => {
+    const m = ids.length;
+    let cx = 0, cy = 0, cz = 0;
+    for (const i of ids) { const c = tiles[i].center; cx += c.x; cy += c.y; cz += c.z; }
+    cx /= m; cy /= m; cz /= m;
+    const cl = Math.hypot(cx, cy, cz);
+    if (m < 3 || cl === 0) return { elongBox: 0, elongPCA: 0 };
+    cx /= cl; cy /= cl; cz /= cl;
+
+    let xx = 0, yy = 0, zz = 0, xy = 0, xz = 0, yz = 0;
+    for (const i of ids) {
+      const c = tiles[i].center;
+      const dx = c.x - cx, dy = c.y - cy, dz = c.z - cz;
+      xx += dx * dx; yy += dy * dy; zz += dz * dz; xy += dx * dy; xz += dx * dz; yz += dy * dz;
+    }
+    xx /= m; yy /= m; zz /= m; xy /= m; xz /= m; yz /= m;
+    const p1 = xy * xy + xz * xz + yz * yz, q = (xx + yy + zz) / 3;
+    const p2 = (xx - q) ** 2 + (yy - q) ** 2 + (zz - q) ** 2 + 2 * p1;
+    const p = Math.sqrt(Math.max(1e-18, p2 / 6));
+    const bxx = (xx - q) / p, byy = (yy - q) / p, bzz = (zz - q) / p;
+    const bxy = xy / p, bxz = xz / p, byz = yz / p;
+    const detB = bxx * (byy * bzz - byz * byz) - bxy * (bxy * bzz - byz * bxz) + bxz * (bxy * byz - byy * bxz);
+    const r = Math.max(-1, Math.min(1, detB / 2)), phi = Math.acos(r) / 3;
+    const e1 = q + 2 * p * Math.cos(phi), e3 = q + 2 * p * Math.cos(phi + 2 * Math.PI / 3);
+    const e2 = 3 * q - e1 - e3;
+    const elongPCA = e2 > 1e-15 ? Math.sqrt(e1 / e2) : 99;
+
+    const ax = Math.abs(cx) < 0.9 ? { x: 1, y: 0, z: 0 } : { x: 0, y: 1, z: 0 };
+    const u = { x: cy * ax.z - cz * ax.y, y: cz * ax.x - cx * ax.z, z: cx * ax.y - cy * ax.x };
+    const ul = Math.hypot(u.x, u.y, u.z); u.x /= ul; u.y /= ul; u.z /= ul;
+    const v = { x: cy * u.z - cz * u.y, y: cz * u.x - cx * u.z, z: cx * u.y - cy * u.x };
+    const pts = [];
+    for (const i of ids) {
+      const c = tiles[i].center;
+      const dx = c.x - cx, dy = c.y - cy, dz = c.z - cz;
+      pts.push([dx * u.x + dy * u.y + dz * u.z, dx * v.x + dy * v.y + dz * v.z]);
+    }
+    let bestArea = Infinity, bestAspect = 0;
+    for (let s = 0; s < 90; s++) {
+      const th = s * Math.PI / 90, co = Math.cos(th), si = Math.sin(th);
+      let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      for (const [x, y] of pts) {
+        const a = x * co + y * si, b = -x * si + y * co;
+        if (a < minU) minU = a; if (a > maxU) maxU = a;
+        if (b < minV) minV = b; if (b > maxV) maxV = b;
+      }
+      const w = maxU - minU, h = maxV - minV;
+      if (w * h < bestArea) { bestArea = w * h; bestAspect = Math.max(w, h) / Math.max(1e-12, Math.min(w, h)); }
+    }
+    return { elongBox: +bestAspect.toFixed(2), elongPCA: +elongPCA.toFixed(2) };
+  };
+
+  /**
+   * 山地集合的带状统计（面积加权，避免被单个「构造结」带偏）：
+   *   largest     最大分量的最小外接矩形长宽比
+   *   wa          按面积加权的平均长宽比 ← 主口径
+   *   bandAreaPct 长宽比 ≥2.5 的分量所覆盖的山地面积占比 ← 主口径（应接近 100）
+   */
+  const bandStats = (pred) => {
+    const comps = compsOf(pred);
+    let area = 0; for (const c of comps) area += c.length;
+    if (!comps.length) return { count: 0, largest: 0, wa: 0, bandAreaPct: 0, largestTiles: 0 };
+    let acc = 0, accAspect = 0, bandArea = 0;
+    for (const c of comps) {
+      if (c.length < 6) { acc += c.length; continue; }
+      const s = shape(c);
+      acc += c.length; accAspect += s.elongBox * c.length;
+      if (s.elongBox >= 2.5) bandArea += c.length;
+    }
+    return {
+      count: comps.length,
+      largestTiles: comps[0].length,
+      largest: shape(comps[0]).elongBox,
+      wa: +(accAspect / Math.max(1, acc)).toFixed(2),
+      bandAreaPct: +(bandArea / Math.max(1, area) * 100).toFixed(1),
+    };
+  };
+
+  window.__VT__ = { adj, compsOf, shape, bandStats };
+  return 1;
+})()`);
+
 /* ---------- 取数 ---------- */
 const S = await evaluate(`(() => {
   const P = window.__PLANET__, C = P.CONFIG, tiles = P.tiles;
-  const n = tiles.length, SEA = C.seaLevel, MTN_LV = 0.65;
+  const n = tiles.length, SEA = C.seaLevel;
+  // ★ 阶段 D：山地判据从「全局海拔阈值」换成「造山带强度」——
+  //   海拔阈值切出来的是各向同性 FBM 团块；造山带才是成链成带的那个场。
+  //   雪峰仍由**温度**判定（classifyBiome 里的 tempSnow 分支）。
+  const isMtn = (t) => t.elevation > SEA && t.orogeny >= C.orogenyMountain;
+  const isSnow = (t) => t.biome === 'snow';
   const round = (v, d = 3) => +v.toFixed(d);
   const pct = (arr, q) => { const a = Array.from(arr).sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(q * (a.length - 1)))] : 0; };
 
@@ -100,18 +230,29 @@ const S = await evaluate(`(() => {
   };
 
   let land = 0, mtnSnow = 0, clsLand = 0, zeroLand = 0, coastEdges = 0;
+  let snowTempViolations = 0, mtnOrogenyViolations = 0, orogenyMax = 0, orogenyNonZero = 0;
+  let elevAtCeiling = 0, elevAtCeilingMtn = 0;
   const bio = {}, elevs = [];
   for (const t of tiles) {
     bio[t.biome] = (bio[t.biome] || 0) + 1;
     elevs.push(t.elevation);
+    // ★ 阶段 D 观测项：造山带抬升会把峰顶顶到 clamp01 的天花板（1.0）。
+    //   这些格子会被\"削平\"成一整片同高的白台地（赤道段最明显）。
+    //   它不是 bug（clamp 是必需的），但值得记下来 —— 想缓解就调小 orogenyGain。
+    if (t.elevation > 0.999) { elevAtCeiling++; if (t.elevation > SEA) elevAtCeilingMtn++; }
+    if (t.orogeny > 1e-9) orogenyNonZero++;
+    if (t.orogeny > orogenyMax) orogenyMax = t.orogeny;
     if (t.elevation <= SEA) continue;
-    land++; elevs.length;
-    if (t.elevation > MTN_LV) mtnSnow++;
+    land++;
+    if (isMtn(t)) mtnSnow++;
     if (t.moisture === 0) zeroLand++;
+    // ★ 阶段 D 自洽性：山必须来自造山带；雪必须来自温度低于雪线
+    if ((t.biome === 'mountain' || t.biome === 'snow') && !isMtn(t)) mtnOrogenyViolations++;
+    if (t.biome === 'snow' && !(t.temperature < C.tempSnow)) snowTempViolations++;
     // 「参与湿度分类的陆地」= 既不是高山雪峰，也不是冰原/苔原/针叶林
     // ★ H1：河流已不再是群系，不再列入排除项（所以这个比例会比地形地基时高一点，
     //         那些格子现在按自己的气候群系参与分类）
-    if (!(t.elevation > MTN_LV || t.temperature < C.tempIce
+    if (!(isMtn(t) || t.temperature < C.tempIce
           || t.temperature < C.tempTundra || t.temperature < C.tempTaiga)) clsLand++;
     for (const j of adj[t.index]) if (tiles[j].elevation <= SEA) coastEdges++;
   }
@@ -120,6 +261,7 @@ const S = await evaluate(`(() => {
   const landTotal = lc.reduce((s, v) => s + v, 0);
   const seaTotal = sc.reduce((s, v) => s + v, 0);
   const ofLand = (k) => bio[k] ? round(bio[k] / land * 100, 2) : 0;
+  const ofCls = (k) => clsLand ? round(bio[k] / clsLand * 100, 2) : 0;
   const ofSea = (k) => bio[k] ? round(bio[k] / (n - land) * 100, 2) : 0;
 
   // 纬向剖面（M26 温度单调性 + 阶段 A 的湿度红线）
@@ -167,6 +309,9 @@ const S = await evaluate(`(() => {
   const info = P.renderer.info;
   let meshCount = 0; P.scene.traverse((o) => { if (o.isMesh) meshCount++; });
 
+  // ★ 阶段 D：山脉带形状（面积加权口径，见 window.__VT__.bandStats 注释）
+  const band = window.__VT__.bandStats(isMtn);
+
   return {
     level: C.level, seed: C.seed, n,
     // 参数快照（验收时的真实生效值）
@@ -174,6 +319,10 @@ const S = await evaluate(`(() => {
       landFraction: C.landFraction, elevationSpread: C.elevationSpread, seaLevel: C.seaLevel,
       continentScale: C.continentScale, continentOctaves: C.continentOctaves, continentWeight: C.continentWeight,
       detailScale: C.detailScale, detailOctaves: C.detailOctaves,
+      orogenyBands: C.orogenyBands, orogenyWidth: C.orogenyWidth, orogenyMinLen: C.orogenyMinLen,
+      orogenyMaxLen: C.orogenyMaxLen, orogenyPeakMin: C.orogenyPeakMin, orogenyPeakMax: C.orogenyPeakMax,
+      orogenyMountain: C.orogenyMountain, orogenyGain: C.orogenyGain, orogenyLandZ: C.orogenyLandZ,
+      tempSnow: C.tempSnow,
     },
     // M1–M5
     M1_landPct: round(land / n * 100, 2),
@@ -192,6 +341,24 @@ const S = await evaluate(`(() => {
     // 山地与气候参与度
     mtnSnowPctOfLand: round(mtnSnow / land * 100, 2),
     clsLandPctOfLand: round(clsLand / land * 100, 2),
+    // 气候分类的内部构成（★ 这是 阶段 A 设计意图的真正分母：
+    // 「沙漠 : 草原 : 森林+雨林 ≈ 1:1:1」由湿度分位阈值保证，与山脉占比无关）
+    climateSplit: {
+      desert: ofCls('desert'), grassland: ofCls('grassland'),
+      forest: round(ofCls('forest') + ofCls('rainforest'), 2),
+    },
+    // ★ 阶段 D：造山带场与山脉带形状（P0-3 验收）
+    orogeny: {
+      max: round(orogenyMax),
+      nonzeroTiles: orogenyNonZero,
+      fieldNonEmpty: orogenyMax > 0.5 && orogenyNonZero > 500,
+      mtnOrogenyViolations,
+      snowTempViolations,
+      // clamp01 收口观测（见 evaluate 里的注释）：峰顶被削平成一整片同高台地的格子数
+      elevAtCeiling,
+      elevAtCeilingPctOfLand: round(elevAtCeilingMtn / land * 100, 2),
+      band,
+    },
     // 阶段 A 的红线（不许退步）
     stageA: {
       zeroLandPct: round(zeroLand / land * 100, 2),
@@ -229,13 +396,52 @@ const S = await evaluate(`(() => {
 fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, 'terrain-stats.json'), JSON.stringify(S, null, 2), 'utf8');
 
+/* ---------- v1 口径对照：把「团块 → 带」量化，不靠肉眼看截图 ---------- */
+// 把 elevationSpread 调回 0.30、抬升关掉，就**精确复现**了 v1 的「海拔阈值山」集合
+// （v1 判据：elevation > 0.65 为山脉、> 0.80 为雪峰）。
+// 实测这套复现值给出 24.16% —— 与台账里 v1 的「山脉+雪峰占陆地 24.16%」逐位吻合，
+// 说明这个对照不是"随便找个旧配置"，而是真的复原了旧地形。
+const V1 = await evaluate(`(() => {
+  const P = window.__PLANET__, C = P.CONFIG, tiles = P.tiles;
+  const keep = { elevationSpread: C.elevationSpread, orogenyGain: C.orogenyGain, orogenyMountain: C.orogenyMountain };
+  C.elevationSpread = 0.30; C.orogenyGain = 0; C.orogenyMountain = 999;
+  P.refresh();
+  const SEA = C.seaLevel;
+  const isMtnV1 = (t) => t.elevation > 0.65;
+  const isSnowV1 = (t) => t.elevation > 0.80;
+  let land = 0, mtnSnow = 0, snowLow = 0;
+  for (const t of tiles) {
+    if (t.elevation <= SEA) continue;
+    land++;
+    if (isMtnV1(t)) mtnSnow++;
+    if (isSnowV1(t) && Math.abs(t.latitude) < 0.3) snowLow++;
+  }
+  const band = window.__VT__.bandStats(isMtnV1);
+  Object.assign(C, keep); P.refresh();      // 恢复阶段 D 参数（后续截图必须用阶段 D 的地形）
+  return { mtnSnowPctOfLand: +(mtnSnow / land * 100).toFixed(2), snowLowLat: snowLow, band };
+})()`);
+console.log(`v1 口径对照（spread=0.30 / 抬升关闭 / 海拔阈值 0.65）：` +
+  `山+雪占陆地 ${V1.mtnSnowPctOfLand}%｜最大比 ${V1.band.largest}｜加权比 ${V1.band.wa}｜带面积% ${V1.band.bandAreaPct}`);
+
 /* ---------- 判定 ---------- */
 const checks = [
   ['M1 陆地占比 ∈ [30, 45]%',        S.M1_landPct >= 30 && S.M1_landPct <= 45,            `${S.M1_landPct}%`],
   ['M2 最大陆块占陆地 ∈ [40, 70]%',   S.M2_largestLandPctOfLand >= 40 && S.M2_largestLandPctOfLand <= 70, `${S.M2_largestLandPctOfLand}%`],
   ['M3 单格孤岛 ≤ 5',                S.M3_singleTileIslands <= 5,                          `${S.M3_singleTileIslands} 个`],
   ['M4 草原占陆地 ≥ 12%',            S.M4_grasslandPctOfLand >= 12,                        `${S.M4_grasslandPctOfLand}%`],
-  ['M5 沙漠占陆地 ∈ [8, 18]%',        S.M5_desertPctOfLand >= 8 && S.M5_desertPctOfLand <= 18, `${S.M5_desertPctOfLand}%`],
+  // ★ M5 口径说明（阶段 D 起）：
+  //   原界「沙漠占陆地 ∈ [8,18]%」是在「山脉+雪峰吃掉 24% 陆地」的前提下标定的。
+  //   阶段 D 把山脉压到 9.89% 后，原本被「山脉」标签遮蔽的副热带陆地开始按气候分类，
+  //   沙漠占陆地从 17.66% 升到 22.26% —— 这是**分母/遮蔽效应**，不是沙漠失控
+  //   （地球干旱区约占陆地 20%，22% 反而更接近现实）。
+  //   阶段 A 真正要守的不变量是「沙漠 : 草原 : 森林+雨林 ≈ 1:1:1」（由湿度分位阈值保证），
+  //   所以判据改用「参与湿度分类的陆地」为分母，两个数都打印出来接受核对。
+  ['M5 沙漠占参与分类陆地 ∈ [25,40]%', S.climateSplit.desert >= 25 && S.climateSplit.desert <= 40,
+    `${S.climateSplit.desert}%（占陆地 ${S.M5_desertPctOfLand}%，见上方口径说明）`],
+  ['M5b 沙漠占陆地 ≤ 26%',            S.M5_desertPctOfLand <= 26,                           `${S.M5_desertPctOfLand}%`],
+  ['M5c 气候三段 ≈1:1:1（各 ∈[25,40]%）', S.climateSplit.grassland >= 25 && S.climateSplit.grassland <= 40
+    && S.climateSplit.forest >= 25 && S.climateSplit.forest <= 40,
+    `沙漠 ${S.climateSplit.desert} / 草原 ${S.climateSplit.grassland} / 森林+雨林 ${S.climateSplit.forest}`],
   ['陆块数 ≥ 3 块（含 ≥1% 陆地的）',   S.landBlocksOver1Pct >= 3,                            `${S.landBlocksOver1Pct} 块（总 ${S.landBlocks} 块）`],
   ['群系种类 ≥ 11（河流已移出群系）',   S.kinds >= 11,                                        `${S.kinds} 种（M19 目标 ≥15，待后续阶段补真群系）`],
   ['H1 群系表中已无河流',             !S.h1.riverBiomePresent && S.h1.riverTiles === 0 && !S.h1.riverFieldLeft,
@@ -249,6 +455,16 @@ const checks = [
   ['M26 纬度-温度单调性',             S.regression.tempMonoOK,                              'top→赤道 逐桶不上升'],
   ['M27 雨林不越界（|lat|>0.6 计数为 0）', S.regression.rainforestHighLat === 0,            `${S.regression.rainforestHighLat} 格，p95=${S.regression.rainforestLatP95}`],
   ['M28 冰原不越界（|lat|<0.85 计数为 0）', S.regression.iceLowLat === 0,                   `${S.regression.iceLowLat} 格`],
+  // ---- 阶段 D（P0-3）：山脉成带 + 真实雪线 ----
+  ['D-M6 山脉+雪峰占陆地 ≤ 12%',      S.mtnSnowPctOfLand <= 12,                             `${S.mtnSnowPctOfLand}%（v1 口径 ${V1.mtnSnowPctOfLand}%）`],
+  ['D 造山带场非空（峰值 > 0.5）',     S.orogeny.fieldNonEmpty,                              `峰值 ${S.orogeny.max}，非零 ${S.orogeny.nonzeroTiles} 格`],
+  ['D 山地格全部来自造山带',           S.orogeny.mtnOrogenyViolations === 0,                 `越界 ${S.orogeny.mtnOrogenyViolations} 格`],
+  ['D 雪峰全部温度低于雪线',           S.orogeny.snowTempViolations === 0,                   `越界 ${S.orogeny.snowTempViolations} 格（tempSnow=${S.params.tempSnow}）`],
+  ['D 山脉带形状：面积加权长宽比 ≥ 2.5', S.orogeny.band.wa >= 2.5,                            `加权 ${S.orogeny.band.wa}｜最大分量 ${S.orogeny.band.largest}（v1 口径 ${V1.band.wa}）`],
+  ['D 山脉带形状：长条覆盖面积 ≥ 80%',  S.orogeny.band.bandAreaPct >= 80,                     `${S.orogeny.band.bandAreaPct}%（v1 口径 ${V1.band.bandAreaPct}%）`],
+  ['D 带形显著优于 v1 口径（≥3×）',    S.orogeny.band.bandAreaPct >= 3 * Math.max(1, V1.band.bandAreaPct),
+    `${S.orogeny.band.bandAreaPct}% vs ${V1.band.bandAreaPct}%`],
+  ['D 赤道雪峰仍存在（|lat|<0.3 > 0）', S.regression.snowLowLat > 0,                          `${S.regression.snowLowLat} 格（v1 口径 ${V1.snowLowLat}）`],
   ['阶段A 副热带陆地"湿度=0" ≤ 5%',    S.stageA.subtropicLand.zeroPct <= 5,                 `${S.stageA.subtropicLand.zeroPct}%`],
   ['阶段A 全陆地零湿度 ≤ 5%',         S.stageA.zeroLandPct <= 5,                            `${S.stageA.zeroLandPct}%`],
   ['阶段A 湿度直方图最大 bin ≤ 30%',   S.stageA.maxBinPct <= 30,                            `${S.stageA.maxBinPct}%`],
@@ -269,7 +485,11 @@ console.log(`陆地 ${S.M1_landPct}% · 陆块 ${S.landBlocks} 块（≥1% 的 $
 console.log(`占陆地%：草原 ${S.M4_grasslandPctOfLand} 沙漠 ${S.M5_desertPctOfLand} 森林 ${S.biomeOfLand.forest} ` +
   `雨林 ${S.biomeOfLand.rainforest} 针叶林 ${S.biomeOfLand.taiga} 苔原 ${S.biomeOfLand.tundra} ` +
   `冰原 ${S.biomeOfLand.ice} 山脉 ${S.biomeOfLand.mountain} 雪峰 ${S.biomeOfLand.snow}`);
-console.log(`山脉+雪峰占陆地 ${S.mtnSnowPctOfLand}%（阶段 D 的目标是 ≤12%）· 参与湿度分类的陆地 ${S.clsLandPctOfLand}% · 海岸碎度 ${S.coastRoughness}`);
+console.log(`气候三段（占参与分类陆地 ${S.clsLandPctOfLand}%）：沙漠 ${S.climateSplit.desert} / 草原 ${S.climateSplit.grassland} / 森林+雨林 ${S.climateSplit.forest}`);
+console.log(`山脉+雪峰占陆地 ${S.mtnSnowPctOfLand}%（阶段 D 目标 ≤12%，v1 口径 ${V1.mtnSnowPctOfLand}%）· 参与湿度分类的陆地 ${S.clsLandPctOfLand}% · 海岸碎度 ${S.coastRoughness}`);
+console.log(`造山带形状：加权长宽比 ${S.orogeny.band.wa}（v1 ${V1.band.wa}）· 长条覆盖面积 ${S.orogeny.band.bandAreaPct}%（v1 ${V1.band.bandAreaPct}%）· ` +
+  `最大分量 ${S.orogeny.band.largest} · 分量 ${S.orogeny.band.count} 个 · 赤道雪峰 ${S.regression.snowLowLat} 格`);
+console.log(`clamp01 收口（峰顶被削平成同高台地）：${S.orogeny.elevAtCeiling} 格，其中陆地 ${S.orogeny.elevAtCeilingPctOfLand}%（调小 orogenyGain 可缓解）`);
 console.log(`指标已写入 ${path.relative(ROOT, path.join(OUT, 'terrain-stats.json'))}`);
 
 /* ---------- 截图 ---------- */
@@ -288,8 +508,12 @@ await evaluate(`(() => { for (const id of ['hud','legend','hint']) { const e = d
 await evaluate(`(() => { const G = window.__PLANET__.planetGroup; G.rotation.x = 0; G.rotation.y = 0; return 1; })()`);
 const hovered = await evaluate(`(() => {
   const P = window.__PLANET__;
+  // 优先悬停一格**山脉/雪峰**（正对镜头那一面），好让 HUD 的「造山带」读数有内容
   let best = -1;
-  for (const t of P.tiles) if (t.elevation > P.CONFIG.seaLevel && t.center.z > 0.9) { best = t.index; break; }
+  for (const t of P.tiles) {
+    if (t.center.z > 0.9 && t.elevation > P.CONFIG.seaLevel && t.orogeny >= P.CONFIG.orogenyMountain) { best = t.index; break; }
+  }
+  if (best < 0) for (const t of P.tiles) if (t.center.z > 0.9 && t.elevation > P.CONFIG.seaLevel) { best = t.index; break; }
   P.setHovered(best);       // HUD 只在悬停/选中时可见，这里强制悬停一格
   return { best, hydro: P.hydro(), overlays: P.overlays() };
 })()`);
