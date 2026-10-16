@@ -1425,7 +1425,11 @@ function runSelfTest(tiles) {
     检查项: r.name, 结果: r.ok ? '✅ 通过' : '❌ 失败', 详情: r.detail,
   })));
   console.log('生物群系分布：' + statText);
-  console.log(`海洋占比：${(((stats[BIOME.OCEAN] || 0) / tiles.length) * 100).toFixed(1)}%`);
+  // 注意：报告的是"水域"= 海洋群系 + 海冰，**不是**"elevation ≤ seaLevel"的格数。
+  // 两者在极地会差一整圈海冰（当前 level 5 下约 6 个百分点），是最容易被误读的一个数字。
+  const water = (stats[BIOME.OCEAN] || 0) + (stats[BIOME.SEA_ICE] || 0);
+  console.log(`水域占比：${(water / tiles.length * 100).toFixed(1)}%（海冰 ${stats[BIOME.SEA_ICE] || 0} 格 + 海洋群系 ${stats[BIOME.OCEAN] || 0} 格）`);
+  console.log(`陆地占比：${(100 - water / tiles.length * 100).toFixed(1)}%（= 海平面以上的格数，与工具链口径一致）`);
   console.groupEnd();
 
   const failed = rows.filter((r) => !r.ok);

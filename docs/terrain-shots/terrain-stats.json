@@ -13,6 +13,7 @@
     "detailOctaves": 2
   },
   "M1_landPct": 37.99,
+  "landCount": 3891,
   "M2_largestLandPctOfLand": 48.1,
   "M3_singleTileIslands": 2,
   "M4_grasslandPctOfLand": 19.2,

@@ -173,6 +173,7 @@ const S = await evaluate(`(() => {
     },
     // M1–M5
     M1_landPct: round(land / n * 100, 2),
+    landCount: land,
     M2_largestLandPctOfLand: round(lc[0] / landTotal * 100, 1),
     M3_singleTileIslands: lc.filter((v) => v === 1).length,
     M4_grasslandPctOfLand: ofLand('grassland'),
@@ -233,6 +234,8 @@ const checks = [
   ['阶段A 湿度直方图最大 bin ≤ 30%',   S.stageA.maxBinPct <= 30,                            `${S.stageA.maxBinPct}%`],
   ['阶段A 副热带陆地湿度 std ≥ 0.10',  S.stageA.subtropicLand.std >= 0.10,                  `${S.stageA.subtropicLand.std}`],
   ['海拔分位锚定：p62 == 海平面',      Math.abs(S.elevationQuantiles.p62 - S.params.seaLevel) < 0.005, `p62=${S.elevationQuantiles.p62} vs seaLevel=${S.params.seaLevel}`],
+  ['口径自洽：陆地 + 海洋群系 + 海冰 = 总数', (S.landCount + (S.biome.ocean || 0) + (S.biome.seaIce || 0)) === S.n,
+    `${S.landCount} + ${S.biome.ocean || 0} + ${S.biome.seaIce || 0} = ${S.landCount + (S.biome.ocean || 0) + (S.biome.seaIce || 0)} / ${S.n}`],
 ];
 let fail = 0;
 console.log('');
