@@ -1,0 +1,382 @@
+{
+  "n": 10242,
+  "land": 6439,
+  "landPct": 62.87,
+  "seaPct": 37.13,
+  "bio": {
+    "snow": {
+      "count": 1293,
+      "pctOfAll": 12.62,
+      "pctOfLand": 20.08,
+      "latAbsQ": [
+        0.099,
+        0.574,
+        0.92
+      ],
+      "temp": 0.341,
+      "moist": 0.595,
+      "elev": 0.905
+    },
+    "ocean": {
+      "count": 3483,
+      "pctOfAll": 34.01,
+      "pctOfLand": 91.59,
+      "latAbsQ": [
+        0.041,
+        0.465,
+        0.88
+      ],
+      "temp": 0.829,
+      "moist": 0.597,
+      "elev": 0.178
+    },
+    "taiga": {
+      "count": 531,
+      "pctOfAll": 5.18,
+      "pctOfLand": 8.25,
+      "latAbsQ": [
+        0.603,
+        0.748,
+        0.865
+      ],
+      "temp": 0.526,
+      "moist": 0.821,
+      "elev": 0.524
+    },
+    "grassland": {
+      "count": 828,
+      "pctOfAll": 8.08,
+      "pctOfLand": 12.86,
+      "latAbsQ": [
+        0.082,
+        0.324,
+        0.647
+      ],
+      "temp": 0.805,
+      "moist": 0.43,
+      "elev": 0.487
+    },
+    "rainforest": {
+      "count": 374,
+      "pctOfAll": 3.65,
+      "pctOfLand": 5.81,
+      "latAbsQ": [
+        0,
+        0.081,
+        0.205
+      ],
+      "temp": 0.927,
+      "moist": 0.905,
+      "elev": 0.439
+    },
+    "desert": {
+      "count": 612,
+      "pctOfAll": 5.98,
+      "pctOfLand": 9.5,
+      "latAbsQ": [
+        0.273,
+        0.386,
+        0.493
+      ],
+      "temp": 0.808,
+      "moist": 0.158,
+      "elev": 0.511
+    },
+    "tundra": {
+      "count": 292,
+      "pctOfAll": 2.85,
+      "pctOfLand": 4.53,
+      "latAbsQ": [
+        0.807,
+        0.897,
+        0.958
+      ],
+      "temp": 0.325,
+      "moist": 0.646,
+      "elev": 0.523
+    },
+    "ice": {
+      "count": 189,
+      "pctOfAll": 1.85,
+      "pctOfLand": 2.94,
+      "latAbsQ": [
+        0.924,
+        0.972,
+        0.997
+      ],
+      "temp": 0.11,
+      "moist": 0.473,
+      "elev": 0.521
+    },
+    "mountain": {
+      "count": 1370,
+      "pctOfAll": 13.38,
+      "pctOfLand": 21.28,
+      "latAbsQ": [
+        0.06,
+        0.485,
+        0.939
+      ],
+      "temp": 0.52,
+      "moist": 0.589,
+      "elev": 0.717
+    },
+    "forest": {
+      "count": 480,
+      "pctOfAll": 4.69,
+      "pctOfLand": 7.45,
+      "latAbsQ": [
+        0.021,
+        0.546,
+        0.735
+      ],
+      "temp": 0.745,
+      "moist": 0.905,
+      "elev": 0.519
+    },
+    "seaIce": {
+      "count": 320,
+      "pctOfAll": 3.12,
+      "pctOfLand": 8.41,
+      "latAbsQ": [
+        0.935,
+        0.974,
+        0.998
+      ],
+      "temp": 0.218,
+      "moist": 0.357,
+      "elev": 0.235
+    },
+    "river": {
+      "count": 470,
+      "pctOfAll": 4.59,
+      "pctOfLand": 7.3,
+      "latAbsQ": [
+        0.041,
+        0.434,
+        0.901
+      ],
+      "temp": 0.721,
+      "moist": 0.613,
+      "elev": 0.473
+    }
+  },
+  "latProfile": [
+    {
+      "lat": "00-10%",
+      "n": 1036,
+      "landN": 678,
+      "temp": 0.88,
+      "moistLand": 0.898,
+      "moistStd": 0.1533,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 54,
+      "forest": 119,
+      "rainforest": 230,
+      "taiga": 0,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "10-20%",
+      "n": 1064,
+      "landN": 656,
+      "temp": 0.866,
+      "moistLand": 0.72,
+      "moistStd": 0.2196,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 140,
+      "forest": 80,
+      "rainforest": 121,
+      "taiga": 0,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "20-30%",
+      "n": 996,
+      "landN": 598,
+      "temp": 0.843,
+      "moistLand": 0.382,
+      "moistStd": 0.1681,
+      "zeroPct": 0,
+      "desert": 73,
+      "grassland": 191,
+      "forest": 12,
+      "rainforest": 23,
+      "taiga": 0,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "30-40%",
+      "n": 1048,
+      "landN": 669,
+      "temp": 0.803,
+      "moistLand": 0.164,
+      "moistStd": 0.0818,
+      "zeroPct": 0,
+      "desert": 296,
+      "grassland": 59,
+      "forest": 0,
+      "rainforest": 0,
+      "taiga": 0,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "40-50%",
+      "n": 984,
+      "landN": 674,
+      "temp": 0.745,
+      "moistLand": 0.228,
+      "moistStd": 0.1309,
+      "zeroPct": 0,
+      "desert": 221,
+      "grassland": 124,
+      "forest": 3,
+      "rainforest": 0,
+      "taiga": 0,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "50-60%",
+      "n": 992,
+      "landN": 616,
+      "temp": 0.698,
+      "moistLand": 0.547,
+      "moistStd": 0.2425,
+      "zeroPct": 0,
+      "desert": 22,
+      "grassland": 172,
+      "forest": 77,
+      "rainforest": 0,
+      "taiga": 25,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "60-70%",
+      "n": 1000,
+      "landN": 597,
+      "temp": 0.629,
+      "moistLand": 0.819,
+      "moistStd": 0.2127,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 74,
+      "forest": 123,
+      "rainforest": 0,
+      "taiga": 97,
+      "tundra": 0,
+      "ice": 0
+    },
+    {
+      "lat": "70-80%",
+      "n": 1064,
+      "landN": 696,
+      "temp": 0.53,
+      "moistLand": 0.865,
+      "moistStd": 0.1827,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 13,
+      "forest": 66,
+      "rainforest": 0,
+      "taiga": 290,
+      "tundra": 11,
+      "ice": 0
+    },
+    {
+      "lat": "80-90%",
+      "n": 1060,
+      "landN": 673,
+      "temp": 0.366,
+      "moistLand": 0.734,
+      "moistStd": 0.2236,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 1,
+      "forest": 0,
+      "rainforest": 0,
+      "taiga": 114,
+      "tundra": 141,
+      "ice": 3
+    },
+    {
+      "lat": "90-100%",
+      "n": 998,
+      "landN": 582,
+      "temp": 0.188,
+      "moistLand": 0.532,
+      "moistStd": 0.1728,
+      "zeroPct": 0,
+      "desert": 0,
+      "grassland": 0,
+      "forest": 0,
+      "rainforest": 0,
+      "taiga": 5,
+      "tundra": 140,
+      "ice": 186
+    }
+  ],
+  "subtropicLand": {
+    "n": 1980,
+    "mean": 0.2551,
+    "std": 0.164,
+    "zeroPct": 0
+  },
+  "zeroLandPct": 0,
+  "clsCount": 2294,
+  "clsPctOfLand": 35.6,
+  "clsPercentiles": {
+    "p05": 0.1051,
+    "p15": 0.1688,
+    "p25": 0.2371,
+    "p35": 0.3181,
+    "p50": 0.4866,
+    "p65": 0.6862,
+    "p75": 0.8554,
+    "p85": 1,
+    "p95": 1
+  },
+  "moistureHist": [
+    0,
+    3.6,
+    5.6,
+    4.9,
+    4.8,
+    4.7,
+    4.6,
+    5.1,
+    5.3,
+    4.1,
+    4.8,
+    4.5,
+    4.1,
+    3.7,
+    4.2,
+    3.1,
+    3.1,
+    3,
+    3.1,
+    23.6
+  ],
+  "maxBinPct": 23.6,
+  "regression": {
+    "tempMonoOK": true,
+    "rainforestHighLat": 0,
+    "rainforestLatP95": 0.205,
+    "iceLowLat": 0,
+    "snowLowLat": 288,
+    "equatorSnow": 288
+  },
+  "anomalies": {
+    "rfAdjIce": 0,
+    "desertAdjRainforest": 0,
+    "desertAdjIce": 0
+  }
+}

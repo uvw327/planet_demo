@@ -1,119 +1,111 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>球面地形原型 M3 · 交互与导出</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Goldberg 球体 · 程序化生物群系星球</title>
 <style>
-  :root{
-    --bg:#0b0f14; --panel:rgba(18,24,32,.90); --line:rgba(255,255,255,.10);
-    --fg:#cfd8e3; --dim:#7b8794; --accent:#4fa3c7;
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #05070d;
   }
-  *{box-sizing:border-box;}
-  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);}
-  body{font:12px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;color:var(--fg);-webkit-font-smoothing:antialiased;}
-  #scene{display:block;width:100vw;height:100vh;}
 
-  #hud{position:fixed;top:12px;left:12px;width:276px;background:var(--panel);
-       border:1px solid var(--line);border-radius:8px;padding:10px 12px;
-       backdrop-filter:blur(8px);font-variant-numeric:tabular-nums;}
-  #hud h1{margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.4px;color:#e6edf3;}
-  #hud h1 small{color:var(--dim);font-weight:400;letter-spacing:0;}
-  .row{display:flex;justify-content:space-between;gap:10px;}
-  .row+.row{margin-top:1px;}
-  .row>span:first-child{color:var(--dim);}
-  .row>span:last-child{color:#e6edf3;text-align:right;}
-  hr{border:0;border-top:1px solid var(--line);margin:8px 0;}
-  .tag{color:var(--accent);}
+  canvas { display: block; }
 
-  #views{position:fixed;top:12px;right:12px;display:flex;flex-direction:column;gap:3px;
-         background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px;
-         backdrop-filter:blur(8px);}
-  #views button{appearance:none;border:1px solid transparent;border-radius:5px;background:transparent;
-                color:var(--dim);font:inherit;padding:5px 14px;cursor:pointer;text-align:left;}
-  #views button:hover{background:rgba(255,255,255,.05);color:var(--fg);}
-  #views button.on{background:rgba(79,163,199,.16);border-color:rgba(79,163,199,.45);color:#dff0f8;}
+  /* ---------- 左上角信息面板 ---------- */
+  #hud {
+    position: fixed; top: 16px; left: 16px;
+    min-width: 232px;
+    padding: 12px 15px;
+    background: rgba(9, 15, 27, 0.74);
+    border: 1px solid rgba(110, 165, 225, 0.22);
+    border-radius: 10px;
+    backdrop-filter: blur(9px);
+    -webkit-backdrop-filter: blur(9px);
+    color: #cfe2f5;
+    font: 13px/1.75 ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity .16s ease, transform .16s ease;
+  }
+  #hud.visible { opacity: 1; transform: translateY(0); }
 
-  #panel{position:fixed;bottom:12px;left:12px;width:276px;background:var(--panel);
-         border:1px solid var(--line);border-radius:8px;padding:10px 12px;
-         backdrop-filter:blur(8px);max-height:56vh;overflow:auto;}
-  #panel h2{margin:0 0 6px;font-size:11px;font-weight:600;color:var(--dim);
-            text-transform:uppercase;letter-spacing:.7px;}
-  .ctl{margin:7px 0;}
-  .ctl>label{display:flex;justify-content:space-between;color:var(--dim);margin-bottom:2px;}
-  .ctl>label b{color:#e6edf3;font-weight:500;font-variant-numeric:tabular-nums;}
-  input[type=range]{width:100%;height:16px;margin:0;appearance:none;background:transparent;cursor:pointer;}
-  input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,.16);}
-  input[type=range]::-webkit-slider-thumb{appearance:none;width:11px;height:11px;margin-top:-4px;
-        border-radius:50%;background:var(--accent);border:0;}
-  input[type=range]::-moz-range-track{height:3px;border-radius:2px;background:rgba(255,255,255,.16);}
-  input[type=range]::-moz-range-thumb{width:11px;height:11px;border:0;border-radius:50%;background:var(--accent);}
-  input[type=number],select{width:100%;background:rgba(0,0,0,.35);color:var(--fg);
-        border:1px solid var(--line);border-radius:5px;padding:3px 6px;font:inherit;}
-  button.btn{width:100%;appearance:none;background:rgba(79,163,199,.16);border:1px solid rgba(79,163,199,.45);
-        color:#dff0f8;border-radius:5px;padding:5px 8px;font:inherit;cursor:pointer;}
-  button.btn:hover{background:rgba(79,163,199,.30);}
-  #status{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);
-          color:var(--dim);font-variant-numeric:tabular-nums;pointer-events:none;}
+  #hud .row { display: flex; justify-content: space-between; gap: 18px; }
+  #hud .k { color: #6b87a6; }
+  #hud .v { color: #ecf5ff; font-weight: 600; }
 
-  #overlay{position:fixed;inset:0;display:none;place-items:center;background:rgba(6,9,13,.72);
-           backdrop-filter:blur(2px);z-index:9;}
-  #overlay.on{display:grid;}
-  #overlay .box{text-align:center;}
-  #overlay .t{font-size:15px;color:#e6edf3;letter-spacing:.5px;}
-  #overlay .s{color:var(--dim);margin-top:6px;font-variant-numeric:tabular-nums;}
-  #overlay .bar{margin-top:12px;width:200px;height:2px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden;}
-  #overlay .bar i{display:block;height:100%;width:35%;background:var(--accent);
-                  animation:sweep 1.1s ease-in-out infinite;}
-  @keyframes sweep{0%{transform:translateX(-100%);}100%{transform:translateX(320%);}}
+  /* ---------- 右上角图例 ---------- */
+  #legend {
+    position: fixed; top: 16px; right: 16px;
+    padding: 11px 14px;
+    background: rgba(9, 15, 27, 0.62);
+    border: 1px solid rgba(110, 165, 225, 0.16);
+    border-radius: 10px;
+    backdrop-filter: blur(9px);
+    -webkit-backdrop-filter: blur(9px);
+    font: 12px/1.9 ui-monospace, Consolas, monospace;
+    color: #9db4cc;
+    pointer-events: none;
+  }
+  #legend .item { display: flex; align-items: center; gap: 8px; }
+  #legend .swatch {
+    width: 11px; height: 11px; border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
+  }
 
-  #err{position:fixed;inset:0;display:none;place-items:center;padding:40px;text-align:center;
-       color:#f0c0c0;background:#12161c;line-height:1.9;}
-  #err.on{display:grid;}
+  /* ---------- 左下角操作提示 ---------- */
+  #hint {
+    position: fixed; left: 18px; bottom: 14px;
+    font: 12px ui-monospace, Consolas, monospace;
+    color: #47596e;
+  }
+
+  /* ---------- 加载 / 报错 ---------- */
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #6d8aa8;
+    font: 14px ui-monospace, Consolas, monospace;
+    text-align: center;
+    line-height: 1.9;
+    padding: 24px;
+  }
 </style>
 </head>
 <body>
-<canvas id="scene"></canvas>
 
 <div id="hud">
-  <h1>球面地形原型 <small>M3 · 交互 / 导出</small></h1>
-  <div class="row"><span>视图</span><span id="h-view">海拔</span></div>
-  <div class="row"><span>种子</span><span id="h-seed">1337</span></div>
-  <hr>
-  <div class="row"><span>陆地占比</span><span id="h-land">—</span></div>
-  <div class="row"><span>湖泊格</span><span id="h-lake">—</span></div>
-  <div class="row"><span>最大湖深</span><span id="h-lakedepth">—</span></div>
-  <div class="row"><span>内流湖</span><span id="h-endo">—</span></div>
-  <div class="row"><span>河流格</span><span id="h-river">—</span></div>
-  <div class="row"><span>最大流量</span><span id="h-maxflow">—</span></div>
-  <hr>
-  <div class="row"><span>降雨迭代</span><span id="h-iter">—</span></div>
-  <div class="row"><span>残差</span><span id="h-resid">—</span></div>
-  <div class="row"><span>求解器</span><span id="h-solver">—</span></div>
-  <hr>
-  <div class="row"><span>总耗时</span><span id="h-total">—</span></div>
-  <div class="row"><span>最长单帧</span><span id="h-frame">—</span></div>
-  <hr>
-  <div id="h-tile">
-    <div class="row"><span>悬停格</span><span>—</span></div>
-  </div>
+  <div class="row"><span class="k">生物群系</span><span class="v" id="hud-biome">-</span></div>
+  <div class="row"><span class="k">温&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-temp">-</span></div>
+  <div class="row"><span class="k">湿&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-moist">-</span></div>
+  <div class="row"><span class="k">海&nbsp;&nbsp;&nbsp;&nbsp;拔</span><span class="v" id="hud-elev">-</span></div>
+  <div class="row"><span class="k">纬&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lat">-</span></div>
+  <div class="row"><span class="k">经&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lon">-</span></div>
+  <div class="row"><span class="k">图&nbsp;&nbsp;&nbsp;&nbsp;块</span><span class="v" id="hud-id">-</span></div>
 </div>
 
-<div id="views"></div>
-<div id="panel"><h2>参数（CONFIG）</h2><div id="ctls"></div></div>
-<div id="status"></div>
+<div id="legend"></div>
 
-<div id="overlay"><div class="box">
-  <div class="t" id="ov-text">初始化…</div>
-  <div class="s" id="ov-sub"></div>
-  <div class="bar"><i></i></div>
-</div></div>
+<div id="hint">拖动旋转 · 滚轮缩放 · 悬停查看图块</div>
 
-<div id="err"><div>
-  <b>无法加载 Three.js</b><br>
-  请确认网络可访问 cdn.jsdelivr.net，或把 three 模块下载到本地后修改 &lt;script type="importmap"&gt;。<br>
-  <span id="err-detail"></span>
-</div></div>
+<div id="loading">正在生成星球…</div>
+
+<script>
+  // 若 8 秒后仍未初始化成功，说明模块（CDN）加载失败，给出可操作的提示
+  setTimeout(function () {
+    if (!window.__planetReady) {
+      document.getElementById('loading').innerHTML =
+        '加载失败。<br><br>' +
+        '1. 请确认网络可访问 cdn.jsdelivr.net；<br>' +
+        '2. 或在当前目录启动本地服务器后访问：<br>' +
+        '<span style="color:#8fb4d8">python -m http.server 8080</span>';
+    }
+  }, 8000);
+</script>
 
 <script type="importmap">
 {
@@ -127,2455 +119,948 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
 
-/* ═══════════════════════════════════════════════════════════════════════
-   L0–L2 BEGIN
-   以下到 L0–L2 END 之间为零 THREE 依赖的纯算法层。
-   每个函数上方标注 [Godot-ready]，可逐函数翻译成 GDScript。
-   （headless 测试脚本会按这两个标记抽取区间独立运行）
-   ═══════════════════════════════════════════════════════════════════════ */
+/* =========================================================================
+ * §0  全局配置
+ * 所有可调参数集中在此，改这里即可换一颗截然不同的星球。
+ * ========================================================================= */
+const CONFIG = {
+  /* --- 星球本体 --- */
+  seed: 20261016,      // 噪声种子：换一个数字就是另一颗星球（结果可复现）
 
-/* ───────────────────────── L0 core：纯数学，零依赖 ───────────────────────── */
+  // level 决定球面精细度，图块数 = 10·4^level + 2。实测（纯算法耗时，不含 WebGL 上传）：
+  //   level 3 →   642 图块 /  3840 三角形 /  生成 ~6 ms   /  642  draw call
+  //   level 4 →  2562 图块 / 15360 三角形 /  生成 ~16 ms  / 2562  draw call   ← 精细度与性能的平衡点
+  //   level 5 → 10242 图块 / 61440 三角形 /  生成 ~65 ms  / 10242 draw call
+  // 注意：level 5 的瓶颈不在生成耗时，而在「每个图块一个 Mesh」带来的上万次 draw call，
+  //       浏览器端会明显掉帧。若要上 level 5，需改为「单一 BufferGeometry + 顶点色」的架构。
+  level: 5,
 
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 确定性 PRNG，同种子同序列 */
+  /* --- 生物群系判定阈值 --- */
+  seaLevel: 0.35,        // 海平面：elevation 低于此值为海洋
+  seaIceLatitude: 0.93,  // |latitude| 超过此值的海面 → 海冰
+
+  /* --- 气候模型 --- */
+  // 温度由「太阳辐射（cos 纬度）+ 海拔递减」决定，湿度由「三圈环流」纬度带决定，
+  // 两者共同划分气候带，避免出现「冰原旁边长着热带雨林」这类不合理现象。
+  lapseRate: 0.50,        // 海拔递减率：陆地相对高度每 +1，温度下降多少
+  climateScale: 1.50,     // 气候扰动噪声频率
+  tempNoise: 0.05,        // 温度扰动幅度（让等温线不是完美的圆）
+  // ★ 湿度扰动改为「乘性」（阶段 A）：
+  //   旧版是加性 `moisture += jitter * 0.30`，在基础湿度接近 0 的干旱区会把值推成负数，
+  //   再被 clamp01 截成 0 —— 于是形成「一整片精确等于 0 的绝对沙漠环」。
+  //   乘性扰动的绝对幅度随基础湿度缩放（湿处波动大、干处波动小），且只要基础值 > 0 就永不为负。
+  moistureNoise: 0.90,    // 湿度乘性扰动强度（指数形式：moisture ×= exp(jitter · 该值)）
+  // ★ 副热带下沉脱湿强度（乘性）：副热带基础湿度保留 (1 − 该值)。
+  //   旧版是减性扣减 `- drySubtropic * 0.85`，在副热带中心把 0.253 减成 −0.597 → 截成 0。
+  subtropicDrying: 0.45,
+
+  // 温度带阈值（0 = 极寒，1 = 酷热）
+  tempIce: 0.22,          // 低于此值 → 冰原（约 |lat| > 0.975，即纬度 77° 以上）
+  tempTundra: 0.42,       // 低于此值 → 苔原（约纬度 65° 以上）
+  tempTaiga: 0.62,        // 低于此值 → 针叶林（约纬度 52° 以上）
+  tempTropical: 0.85,     // 高于此值 → 热带（约纬度 32° 以内）
+
+  // 湿度阈值（0 = 极干，1 = 极湿）
+  // ★ 阶段 A 重新标定：旧的 0.30 / 0.48 是按「旧湿度场」定的，而旧湿度场在副热带
+  //   是从 0.005 直接跳到 0.375（10% 纬度内），阈值落在那段悬崖上，导致沙漠与森林直接相邻、
+  //   草原只剩 1.39%。换成乘性湿度场后分布平滑了，阈值必须跟着重新落位。
+  //   新的两个阈值是按「参与湿度分类的陆地」（2288 格，约占陆地 35.6%）的湿度分位定的：
+  //     沙漠   = 分位 ≤ p27   ≈ 0.25  → 约占陆地 10%
+  //     草原   = 分位 p27~p63 ≈ 0.65  → 约占陆地 13%
+  //     森林+雨林 = 分位 > p63        → 约占陆地 13%
+  //   这样「沙漠 → 半干旱草原 → 森林」三段各占约三分之一，且彼此都有连续过渡。
+  moistureDesert: 0.25,   // 低于此值 → 沙漠
+  moistureGrassland: 0.65,// 低于此值 → 草原，以上 → 森林
+
+  /* --- 地形高度（FBM）--- */
+  continentScale: 0.80,   // 大陆噪声频率：越小 → 大陆越成片
+  continentOctaves: 4,    // 大陆噪声八度
+  continentWeight: 0.65,  // 大陆噪声权重（其余为细节噪声）
+  detailScale: 3.00,      // 细节噪声频率：越大 → 地形越碎
+  detailOctaves: 6,       // 细节噪声八度
+
+  /* --- 高度分布标准化（保证海陆比可预测）--- */
+  elevationCenter: 0.45,  // 高度分布的"中心"位置
+  elevationSpread: 0.30,  // 高度分布的"展开"幅度：越大 → 海洋与高山都更多
+
+  /* --- 河流（脊线噪声）--- */
+  riverScale: 2.20,          // 河流噪声频率：越大 → 河网越密
+  riverWidth: 0.13,          // 河流判定阈值：越大 → 河越宽（实测影响约 4~5% 的图块）
+  riverMaxElevation: 0.62,   // 河流出现的海拔上限
+
+  /* --- 立体感 --- */
+  // 本星球是「选择出生地」的俯视界面，不是可供 3D 角色行走的地形。
+  // 山脉与平原的视觉差别由贴图/颜色表达（类似 RimWorld 的平面地图），
+  // 因此刻意保持一个完全光滑的球面，不做任何高度起伏。
+  // 若将来确实需要高低起伏，把下面这行改为 true 即可恢复「共享顶点半径」的隆起方案（无缝隙）。
+  enableHeightOffset: false,
+  heightScale: 0.10,         // 隆起幅度，仅在 enableHeightOffset 为 true 时生效
+
+  /* --- 其他 --- */
+  enableRotation: false,     // 行星自转
+  rotationSpeed: 0.05,       // 自转速度（弧度/秒）
+  debugAssert: true,         // 是否在控制台输出自测结果
+};
+
+/* =========================================================================
+ * §1  常量表与工具函数
+ * ========================================================================= */
+
+/** 生物群系枚举 */
+const BIOME = {
+  OCEAN:      'ocean',       // 海洋
+  SEA_ICE:    'seaIce',      // 极地海冰
+  RIVER:      'river',       // 河流
+  DESERT:     'desert',      // 沙漠（炎热 + 干旱）
+  GRASSLAND:  'grassland',   // 草原（半干旱）
+  FOREST:     'forest',      // 温带森林
+  RAINFOREST: 'rainforest',  // 热带雨林（炎热 + 湿润）
+  TAIGA:      'taiga',       // 针叶林（寒温带）
+  TUNDRA:     'tundra',      // 苔原（亚寒带）
+  MOUNTAIN:   'mountain',    // 山脉
+  SNOW:       'snow',        // 雪峰
+  ICE:        'ice',         // 极地冰原
+};
+
+/** 生物群系 → 纯色（后续可替换为手绘贴图） */
+const BIOME_COLOR = {
+  [BIOME.OCEAN]:      0x1a3a6b,
+  [BIOME.SEA_ICE]:    0xcfe2ee,
+  [BIOME.RIVER]:      0x3a9bd9,
+  [BIOME.DESERT]:     0xe0c56e,
+  [BIOME.GRASSLAND]:  0x9ab54f,
+  [BIOME.FOREST]:     0x3d8c40,
+  [BIOME.RAINFOREST]: 0x1f6b2e,
+  [BIOME.TAIGA]:      0x2f6b4f,
+  [BIOME.TUNDRA]:     0x8b9683,
+  [BIOME.MOUNTAIN]:   0x7a7a7a,
+  [BIOME.SNOW]:       0xf0f0f0,
+  [BIOME.ICE]:        0xdce8f2,
+};
+
+/** 生物群系 → HUD 中文名 */
+const BIOME_LABEL = {
+  [BIOME.OCEAN]:      '海洋',
+  [BIOME.SEA_ICE]:    '海冰',
+  [BIOME.RIVER]:      '河流',
+  [BIOME.DESERT]:     '沙漠',
+  [BIOME.GRASSLAND]:  '草原',
+  [BIOME.FOREST]:     '温带森林',
+  [BIOME.RAINFOREST]: '热带雨林',
+  [BIOME.TAIGA]:      '针叶林',
+  [BIOME.TUNDRA]:     '苔原',
+  [BIOME.MOUNTAIN]:   '山脉',
+  [BIOME.SNOW]:       '雪峰',
+  [BIOME.ICE]:        '冰原',
+};
+
+/** 高度阶梯阈值（高山与低地气候无关，单独处理） */
+const SNOW_LEVEL     = 0.80;
+const MOUNTAIN_LEVEL = 0.65;
+
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const clamp   = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/**
+ * mulberry32：32 位种子伪随机数生成器，返回 [0,1) 的浮点数。
+ * 用它替代 Math.random，使地形完全可复现。
+ */
 function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
-    a = (a + 0x6D2B79F5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 3D 梯度噪声（Perlin improved），值域约 [-0.7,0.7] */
-function makeNoise3D(seed) {
-  const perm = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) perm[i] = i;
-  const rnd = mulberry32(seed);
-  for (let i = 255; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    const t = perm[i]; perm[i] = perm[j]; perm[j] = t;
+/* =========================================================================
+ * §2  噪声
+ * 注意：three 的 SimplexNoise 构造函数调用的是 r.random()，
+ *      因此必须传入「带 random() 方法的对象」，不能直接传函数。
+ * ========================================================================= */
+const rng = mulberry32(CONFIG.seed);
+const noise = new SimplexNoise({ random: rng });
+
+// 五路互不相关的固定偏移，避免不同频率的噪声在原点附近产生关联
+const OFFSET_A = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 大陆
+const OFFSET_B = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 细节
+const OFFSET_C = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 河流
+const OFFSET_D = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 温度扰动
+const OFFSET_E = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 湿度扰动
+
+/** 统一的 3D 噪声采样入口（返回约 [-1, 1]，便于将来替换噪声实现） */
+function sampleNoise3D(x, y, z) {
+  return noise.noise3d(x, y, z);
+}
+
+/**
+ * 分形布朗运动（FBM）：多个八度的噪声叠加，得到更自然的地形。
+ * @returns 归一化到约 [-1, 1] 的值
+ */
+function fbm3(p, octaves, lacunarity, gain, offset) {
+  let amp = 1, freq = 1, sum = 0, norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * sampleNoise3D(
+      p.x * freq + offset.x,
+      p.y * freq + offset.y,
+      p.z * freq + offset.z,
+    );
+    norm += amp;
+    amp  *= gain;
+    freq *= lacunarity;
   }
-  const p = new Uint8Array(512);
-  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
-
-  const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
-  const lp = (a, b, t) => a + t * (b - a);
-  function grad(hash, x, y, z) {
-    const h = hash & 15;
-    const u = h < 8 ? x : y;
-    const v = h < 4 ? y : (h === 12 || h === 14) ? x : z;
-    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
-  }
-  return function noise3(x, y, z) {
-    const fx = Math.floor(x), fy = Math.floor(y), fz = Math.floor(z);
-    const X = fx & 255, Y = fy & 255, Z = fz & 255;
-    x -= fx; y -= fy; z -= fz;
-    const u = fade(x), v = fade(y), w = fade(z);
-    const A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z;
-    const B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z;
-    return lp(
-      lp(lp(grad(p[AA], x, y, z), grad(p[BA], x - 1, y, z), u),
-         lp(grad(p[AB], x, y - 1, z), grad(p[BB], x - 1, y - 1, z), u), v),
-      lp(lp(grad(p[AA + 1], x, y, z - 1), grad(p[BA + 1], x - 1, y, z - 1), u),
-         lp(grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1), u), v),
-      w);
-  };
+  return sum / norm;
 }
 
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 分形布朗运动 */
-function makeFbm(noise3, octaves, lacunarity, gain) {
-  return function fbm(x, y, z) {
-    let amp = 1, freq = 1, sum = 0, norm = 0;
-    for (let i = 0; i < octaves; i++) {
-      sum += amp * noise3(x * freq, y * freq, z * freq);
-      norm += amp;
-      amp *= gain; freq *= lacunarity;
-    }
-    return sum / norm;
-  };
-}
+/* =========================================================================
+ * §3  球体网格生成（二十面体 → 细分 → 对偶图）
+ * ========================================================================= */
 
-const v3Add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-const v3Sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const v3Mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
-const v3Dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const v3Cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const v3Len = (a) => Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-const v3Dist = (a, b) => Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
-function v3Norm(a) { const l = v3Len(a); return l < 1e-12 ? [0, 0, 0] : [a[0] / l, a[1] / l, a[2] / l]; }
-const v3Lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 球面切平面正交基（极点安全） */
-function v3PerpBasis(n) {
-  const ref = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
-  let e1 = v3Cross(ref, n);
-  if (v3Len(e1) < 1e-9) e1 = v3Cross([1, 0, 0], n);
-  e1 = v3Norm(e1);
-  const e2 = v3Cross(n, e1);
-  return [e1, e2];
-}
-
-const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
-const lerp = (a, b, t) => a + (b - a) * t;
-function smoothstep(e0, e1, x) {
-  const t = clamp((x - e0) / (e1 - e0 === 0 ? 1e-9 : e1 - e0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
-/** [Godot-ready] 纯算法 —— 分位数（就地排序副本，用于统计调参） */
-function percentile(arr, q) {
-  const a = Array.from(arr).sort((x, y) => x - y);
-  if (a.length === 0) return 0;
-  return a[clamp(Math.floor(q * (a.length - 1)), 0, a.length - 1)];
-}
-
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 二叉最小堆（priority-flood 与山脉 BFS 共用） */
-class MinHeap {
-  constructor() { this.keys = []; this.prios = []; }
-  get size() { return this.keys.length; }
-  clear() { this.keys.length = 0; this.prios.length = 0; }
-  push(key, prio) {
-    const k = this.keys, p = this.prios;
-    k.push(key); p.push(prio);
-    let i = k.length - 1;
-    while (i > 0) {
-      const par = (i - 1) >> 1;
-      if (p[par] <= p[i]) break;
-      const tk = k[par]; k[par] = k[i]; k[i] = tk;
-      const tp = p[par]; p[par] = p[i]; p[i] = tp;
-      i = par;
-    }
-  }
-  pop() {
-    const k = this.keys, p = this.prios;
-    const top = k[0];
-    const lk = k.pop(), lp = p.pop();
-    if (k.length > 0) {
-      k[0] = lk; p[0] = lp;
-      let i = 0; const n = k.length;
-      for (;;) {
-        const l = 2 * i + 1, r = l + 1;
-        let m = i;
-        if (l < n && p[l] < p[m]) m = l;
-        if (r < n && p[r] < p[m]) m = r;
-        if (m === i) break;
-        const tk = k[m]; k[m] = k[i]; k[i] = tk;
-        const tp = p[m]; p[m] = p[i]; p[i] = tp;
-        i = m;
-      }
-    }
-    return top;
-  }
-}
-
-/* ═══════════════ 参数配置 CONFIG（全部关键参数集中于此） ═══════════════ */
-
-const CONFIG = {
-  /* ── 网格 ── */
-  level: 5,                      // icosphere 细分级别；5 → 10242 region / 3 draw call
-  seaLevel: 0.20,                // 海平面（海拔坐标系，可为负）；开掩码后这才是「陆地占比」主旋钮
-  seed: 1337,                    // 噪声种子（同种子结果完全一致）
-
-  /* ── 地形（L2 步 1–3）── */
-  terrain: {
-    noiseScale: 1.8,             // 大陆/丘陵 FBM 频率
-    octaves: 6,                  // FBM 层数
-    lacunarity: 2.0,             // FBM 频率倍率
-    persistence: 0.5,            // FBM 增益
-    detailScale: 16.0,           // 细节粗糙度频率（周期 ≈ 2~3 格，专门制造封闭洼地 → 湖泊）
-    detailAmp: 0.050,            // 细节粗糙度幅度
-    ridgeScale: 3.2,             // 山脉脊线噪声频率
-    ridgeAmp: 0.60,              // 山脉脊线抬升幅度
-    elevationCenter: 0.40,       // z-score 中心（配合 seaLevel 决定陆海比；开包络后约 60% 陆地）
-    elevationSpread: 0.19,       // z-score 标准差
-    mountainSpacing: 0.280,      // Poisson-disk 峰点最小间距（球面弧度）
-    mountainDensity: 1.000,      // 候选点保留概率（1.0 = 全部保留，密度只由 spacing 决定）
-    mountainSharpness: 9.8,      // ★ 山脉脊线增强倍率（面板可调，内部 /10 归一）
-    mountainWidth: 0.200,        // 山脉影响半径（球面弧度）；决定山脉带宽与平原占比
-    // ★ 大陆掩码（Continent mask）—— 不是「加到海拔上的偏置」，而是**在 z-score 之后**
-    //   按掩码把大陆外压低。这一点是关键：若把包络直接加进 elevationRaw，
-    //   大陆就变成一个光滑穹顶，内部起伏被抹平 → 河流退化成「从海岸向内的平行直棍」。
-    //   掩码做法保留大陆内部原有的分形起伏，排水才是树状。
-    //   continentAmp = 0 时完全关闭（= M2 的迷宫型海陆）。
-    continentAmp: 1.0,           // 掩码强度（0 = 关闭掩码，回到 M2 迷宫型；1 = 满强度）
-    continentScale: 0.70,        // 包络频率（越小 → 大陆越大）
-    continentOctaves: 2,         // 包络 FBM 层数
-    continentBias: -0.80,        // 掩码阈值（**标准差单位**；越大 → 大陆越小 / 海洋越多）
-    continentBand: 0.12,         // 掩码过渡带半宽（标准差单位；越大 → 海岸越破碎）
-    continentLandLift: 0.0,      // 额外抬升大陆内部（★ 会整体抬高陆地 → 直减率把全球变冷；默认 0 不用）
-    oceanDepth: 0.80,            // ★ z-score 之后大陆外的压低量（决定大洋占比与深度）
-    lapseRate: 0.6,              // ★ 温度直减率（补充 1）
-    tempJitter: 0.05,            // 温度噪声抖动
-  },
-
-  /* ── 风与降雨（L2 步 4–5）── */
-  climate: {
-    windMode: 'zonal',           // ★ 'zonal'（默认，三圈环流）| 'uniform'（调试）
-    windMeridional: 0.25,        // 经向分量
-    windUniformDir: [1, 0, 0],   // uniform 模式的风向
-    raininess: 0.9,              // ★ 全局降雨强度（mapgen4: rainfall += raininess * …）
-    rainReference: 0.40,         // moisture = rainfall / rainReference（固定参考值，滑杆才能改变群系分布）
-    convectiveRain: 0.5,         // 平流水汽直接降水（mapgen4: rainfall += raininess*humidity）
-    oceanEvaporation: 0.35,      // 海洋向饱和值松弛的速率
-    landEvaporation: 0.55,       // ★ 陆面蒸发速率（植被 / 土壤 / 内陆水体）；越大 → 超级大陆内陆越不干
-    landSaturation: 0.55,        // ★ 陆面蒸发饱和上限（再乘 T^exp：暖地湿、寒地干）
-    evaporationExponent: 2.0,    // 饱和湿度 ∝ T^exp（暖海蒸发快）
-    saturationFloor: 0.15,       // 冷海最低饱和湿度（极地海洋也干 → 极地荒漠）
-    rainShadow: 0.5,             // 超容量降水的提取率（mapgen4 rain_shadow 默认）
-    subtropicalLat: 30,          // 副热带下沉中心纬度（度）
-    subtropicalWidth: 14,        // 副热带下沉带宽（度）
-    subtropicalStrength: 0.62,   // ★ 副热带下沉脱湿强度（沙漠靠它造出来）；过大 → 沙漠带过宽
-    stormTrack: 0.70,            // ★ 中纬风暴带（极锋辐合带）降水强度；0 = 关（中纬会变最干）
-    stormTrackLat: 48,           // 风暴带中心纬度（度）
-    stormTrackWidth: 12,         // 风暴带宽度（度）
-    rainMaxIter: 400,            // 迭代上限
-    rainTolerance: 1e-4,         // 收敛残差
-    rainSolver: 'gaussSeidel',   // ★ 'gaussSeidel'（默认）| 'jacobi'（调试）
-  },
-
-  /* ── 水文（L2 步 6–8）── */
-  hydro: {
-    lakeMinDepth: 0.050,         // 判定为湖的最小填平量（★ 小了会满地「六角螺帽」小湖、且河道变碎）
-    endorheicRain: 0.10,         // 内流盆地判据：流域平均降雨阈值（实测降雨 p50=0.069 p70=0.118，取 0.10 ≈ p63）
-    riverThreshold: 2.0,         // ★ 河流流量阈值（实测：level 4/5 下约对应 2~3% 陆地成河）
-    flowGain: 1.0,               // 产流 = flowGain · moisture²（mapgen4: flow · moisture²）
-    allowNoOcean: true,          // 全陆地球的兜底
-  },
-
-  /* ── 生物群系阈值（L2 步 9）：按 level 5 实测分位标定（大陆包络 + 陆面蒸发之后重标） ──
-     陆地 temperature 分位 p15=0.43 p30=0.61 p50=0.72 p70=0.80 p85=0.85
-     陆地 moisture    分位 p15=0.09 p30=0.115 p45=0.139 p50=0.149 p70=0.236 p82=0.346
-     阈值取分位点，保证各群系都有可观占比（不是「全是灌丛」） */
-  biome: {
-    tempSeaice: 0.12, tempSnow: 0.18, tempIce: 0.22,
-    tempTundra: 0.32,
-    tempCool: 0.48, tempWarm: 0.63, tempTropical: 0.80,
-    moistDry: 0.14, moistWet: 0.34,
-    // ★ 热带干旱阈值单独抬高：判据是**干旱指数 P/PET**，赤道潜热大 → 同样降水量
-    //   在热带支撑不了植被。若和温带共用 0.14，热带荒漠会被算成稀树草原（沙漠只有 2%）。
-    moistAridTropical: 0.24,
-    mountainBiomeThreshold: 0.60,
-    snowLine: 0.78,              // 陆色 fade 到雪白的海拔阈值
-  },
-
-  /* ── 渲染（L3）── */
-  render: {
-    reliefScale: 0.000,          // ★ 地形几何起伏（0 = 纯球面，起伏只靠 hillshade 表达）
-                                 //   ★★ 为什么默认 0：墨线 / 河流 / 湖面都是「贴着球面的贴花层」，
-                                 //      只按固定 lift 抬高。只要 lift < 当地地形起伏，斜视时就会被
-                                 //      三角形挡掉（实测 reliefScale=0.02、lift=0.009 时河流仅 17% 可见）。
-                                 //      纯球面时贴花层永远在最外层 → 零遮挡。开起伏必须把 lift 抬到 > reliefScale。
-    lightZenithDeg: 45,          // 光照天顶角
-    lightAzimuthDeg: 315,        // 光照罗盘方位（右上打光）
-    ambient: 0.62,               // 环境光
-    diffuse: 0.55,               // 漫反射
-    shadeGain: 1.0,              // ★ 山体阴影增益（与几何起伏解耦：reliefScale=0 时山脉仍清晰可见）
-    coastLift: 0.0015,           // 海岸线抬升
-    riverLift: 0.0090,           // 河流抬升，防 z-fighting（M2 加大：缎带有宽度，边缘容易埋进谷壁）
-    coastColor: '#1b2a33',       // 海岸墨色
-    coastOpacity: 0.55,          // 海岸线不透明度
-    deepWaterDepth: 0.085,       // 深海判定深度
-
-    /* ── M2 手绘渲染 ── */
-    coastWidth: 0.0042,          // ★ 海岸墨线全宽（球面半径单位）；M1 是 1px，M2 换成带状几何
-    inkLift: 0.0009,             // 墨线额外抬升（避免与水/湖面 z-fighting）
-    riverMinWidth: 0.0018,       // ★ 河流缎带最小全宽（支流细线）
-    riverMaxWidth: 0.0150,       // ★ 河流缎带最大全宽（下游干流）
-    riverAreaThreshold: 5,       // ★ 河道拓扑门槛：上游汇水面积 ≥ 该格数才承认是河道
-    riverFlowMin: 0.10,          // ★ 水量门槛：流量 < 该值视为干河床，不画
-    riverWidthBias: 0.38,        // 宽度 = lerp(min,max, t^bias)；<0.5 → 细流也看得见
-    riverSmooth: 3,              // ★ 每个河道格的 Bezier 子段数（1 = 关掉平滑，回到硬折角）
-    riverColor: '#2f7ba5',       // 主河道水色
-    riverTribColor: '#5f9fba',   // 支流细线水色（浅一档，让主河道跳出来）
-    riverOpacity: 0.92,
-    lakeShoreColor: '#1d4a5c',   // 湖岸墨色
-    lakeShoreWidth: 0.0030,      // 湖岸线全宽
-    lakeShoreMinCells: 4,        // ★ 连通湖小于该格数就不描边（否则单格湖=正六边形圈）
-    lakeColor: '#3f9ab0',        // 淡水湖水面色
-    saltLakeColor: '#2d7f86',    // 咸水湖（内流）水面色：更深蓝绿
-    lakeBlend: 0.62,             // 湖面把陆色替换成水色的比例
-    paperTint: '#efe6d5',        // ★ 纸底色（暖白）
-    paperMix: 0.070,             // ★ 纸底色混合比例（0 = 关）
-    paperNoise: 0.085,           // ★ 逐顶点颗粒幅度（乘性，0 = 关）
-    paperScale: 40.0,            // 颗粒频率（≈ 网格分辨率 1/2 → 逐顶点颗粒感最强）
-
-    /* ── M3 交互（hover / 选中轮廓） ── */
-    hoverLift: 0.0140,           // ★ 轮廓抬升：必须 > riverLift(0.0090)，否则被河流缎带盖住
-    hoverColor: '#ffd479',       // 悬停轮廓色（暖黄，与青蓝主色互补）
-    selectColor: '#ff8a5c',      // 选中轮廓色（橙红）
-  },
-
-  view: 'elev',                  // ★ 初始调试视图
-};
-
-/* ═══════════════════════════════════════════════════════════════════════
-   L1 mesh —— 拓扑与几何（只依赖 L0）
-   ═══════════════════════════════════════════════════════════════════════ */
-
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 单位正二十面体 */
-function buildIcosphere() {
+/**
+ * 构造正二十面体。
+ * 顶点来自标准公式 (±1, ±φ, 0) 的轮换，其模长约为 1.902，
+ * 因此必须逐个 normalize()，否则 center.y 不再等于 sin(纬度)。
+ */
+function buildIcosahedron() {
   const t = (1 + Math.sqrt(5)) / 2;
   const raw = [
-    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
-    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
-    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+    [-1,  t,  0], [ 1,  t,  0], [-1, -t,  0], [ 1, -t,  0],
+    [ 0, -1,  t], [ 0,  1,  t], [ 0, -1, -t], [ 0,  1, -t],
+    [ t,  0, -1], [ t,  0,  1], [-t,  0, -1], [-t,  0,  1],
   ];
-  const verts = raw.map(v3Norm);
+  const vertices = raw.map((v) => new THREE.Vector3(v[0], v[1], v[2]).normalize());
+
   const faces = [
     [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
     [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
     [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
     [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
   ];
-  return { verts, faces: ensureOutward(verts, faces) };
+  return { vertices, faces };
 }
 
-/** [Godot-ready] 纯算法 —— 保证所有面的绕序朝外（法线与质心同侧） */
-function ensureOutward(verts, faces) {
-  for (const f of faces) {
-    const a = verts[f[0]], b = verts[f[1]], c = verts[f[2]];
-    const n = v3Cross(v3Sub(b, a), v3Sub(c, a));
-    const cen = [a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]];
-    if (v3Dot(n, cen) < 0) { const tmp = f[1]; f[1] = f[2]; f[2] = tmp; }
-  }
-  return faces;
-}
+/**
+ * 递归细分：每个三角形一分为四，中点归一化投影到单位球面。
+ * 必须用 Map 缓存边中点，保证共享边两侧引用的是同一个顶点索引。
+ */
+function subdivide(vertices, faces, level) {
+  for (let iter = 0; iter < level; iter++) {
+    const cache = new Map();  // 边 → 中点顶点索引
 
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 四边形细分（每面一分为四，中点投影回球面） */
-function subdivideIcosahedron(verts, faces, level) {
-  for (let it = 0; it < level; it++) {
-    const cache = new Map();
-    const nv = verts.slice();
-    const mid = (a, b) => {
-      const lo = Math.min(a, b), hi = Math.max(a, b);
-      const key = lo * 1e7 + hi;
-      let m = cache.get(key);
-      if (m === undefined) {
-        nv.push(v3Norm(v3Lerp(verts[a], verts[b], 0.5)));
-        m = nv.length - 1;
-        cache.set(key, m);
-      }
-      return m;
+    const getMidpoint = (i, j) => {
+      // 数值键：min*1e6 + max。顶点总数远小于 1e6（level=4 时 V=2562），键唯一
+      const key = Math.min(i, j) * 1e6 + Math.max(i, j);
+      let idx = cache.get(key);
+      if (idx !== undefined) return idx;
+
+      const v = vertices[i].clone().add(vertices[j]).normalize();
+      idx = vertices.push(v) - 1;
+      cache.set(key, idx);
+      return idx;
     };
-    const nf = [];
-    for (const f of faces) {
-      const ab = mid(f[0], f[1]), bc = mid(f[1], f[2]), ca = mid(f[2], f[0]);
-      nf.push([f[0], ab, ca], [f[1], bc, ab], [f[2], ca, bc], [ab, bc, ca]);
+
+    const next = [];
+    for (const [a, b, c] of faces) {
+      const ab = getMidpoint(a, b);
+      const bc = getMidpoint(b, c);
+      const ca = getMidpoint(c, a);
+      next.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
     }
-    verts = nv; faces = nf;
+    faces = next;
   }
-  return { verts, faces: ensureOutward(verts, faces) };
+  return { vertices, faces };
 }
 
 /**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript —— 构造对偶结构。
- * r（region）= 原网格顶点 = 地块；t（triangle）= 原网格面 = 小区块。
- * 返回值里的 regionTris 是绕 region 一圈的三角形环序（5 或 6 个）。
- */
-function buildDual(verts, faces) {
-  const nR = verts.length, nT = faces.length;
-
-  // 每个三角形 → 一个 dual 顶点（重心，投影回球面）
-  const triCenters = new Array(nT);
-  for (let t = 0; t < nT; t++) {
-    const f = faces[t];
-    const c = [
-      (verts[f[0]][0] + verts[f[1]][0] + verts[f[2]][0]) / 3,
-      (verts[f[0]][1] + verts[f[1]][1] + verts[f[2]][1]) / 3,
-      (verts[f[0]][2] + verts[f[1]][2] + verts[f[2]][2]) / 3,
-    ];
-    triCenters[t] = v3Norm(c);
-  }
-
-  // 有向边 → 所属三角形
-  const dirMap = new Map();
-  for (let t = 0; t < nT; t++) {
-    const f = faces[t];
-    for (let i = 0; i < 3; i++) dirMap.set(f[i] * nR + f[(i + 1) % 3], t);
-  }
-
-  // 每个 region 的第一个三角形
-  const firstFaceOf = new Int32Array(nR).fill(-1);
-  for (let t = 0; t < nT; t++) {
-    const f = faces[t];
-    for (let i = 0; i < 3; i++) if (firstFaceOf[f[i]] < 0) firstFaceOf[f[i]] = t;
-  }
-
-  // 绕 region 的环序：从 f 出发，取 f 中 r 的下一个顶点 w，跳到含 (w→r) 的三角形
-  const regionTris = new Array(nR);
-  for (let r = 0; r < nR; r++) {
-    const ring = [];
-    const start = firstFaceOf[r];
-    let f = start, guard = 0;
-    do {
-      ring.push(f);
-      const ff = faces[f];
-      const k = ff.indexOf(r);
-      const w = ff[(k + 1) % 3];
-      const nx = dirMap.get(w * nR + r);
-      if (nx === undefined || nx === f) break;
-      f = nx;
-    } while (f !== start && ++guard < 16);
-    regionTris[r] = Int32Array.from(ring);
-  }
-
-  // 半边对侧：triAcross[3t+i] = 有向边 (f[i] → f[i+1]) 的对侧三角形，-1 = 边界
-  const triAcross = new Int32Array(3 * nT).fill(-1);
-  for (let t = 0; t < nT; t++) {
-    const f = faces[t];
-    for (let i = 0; i < 3; i++) {
-      const a = f[i], b = f[(i + 1) % 3];
-      const opp = dirMap.get(b * nR + a);
-      triAcross[3 * t + i] = opp === undefined ? -1 : opp;
-    }
-  }
-
-  return { nR, nT, triCenters, regionTris, triAcross };
-}
-
-/** [Godot-ready] 纯算法，可直接翻译成 GDScript —— 邻接表（度数 5 或 6，升序保证确定性） */
-function buildNeighbors(verts, faces, dual) {
-  const nR = dual.nR;
-  const nb = new Array(nR);
-  for (let r = 0; r < nR; r++) {
-    const s = new Set();
-    const ring = dual.regionTris[r];
-    for (let k = 0; k < ring.length; k++) {
-      const f = faces[ring[k]];
-      for (let i = 0; i < 3; i++) if (f[i] !== r) s.add(f[i]);
-    }
-    nb[r] = Int32Array.from(Array.from(s).sort((a, b) => a - b));
-  }
-  return nb;
-}
-
-/** [Godot-ready] 纯算法 —— 球面边长（弦长，小角度时 ≈ 弧度） */
-const sphereEdgeLength = v3Dist;
-
-/** [Godot-ready] 纯算法 —— 球面线性插值（先 lerp 再归一） */
-function sphereInterp(a, b, t) { return v3Norm(v3Lerp(a, b, t)); }
-
-/*__L1DONE__*/
-/* ═══════════════════════════════════════════════════════════════════════
-   L2 terrain —— 因果链：纯数据变换，输入输出都是普通数组，无 THREE 依赖
-   步 1 海拔 → 步 2 山脉 → 步 3 温度 → 步 4 风 → 步 5 降雨
-   → 步 6 下坡 → 步 7 湖泊 → 步 8 流量 → 步 9 生物群系
-   ═══════════════════════════════════════════════════════════════════════ */
-
-/* 生物群系枚举（整数，便于 GDScript 侧一一对应） */
-const BIOME = {
-  OCEAN: 0, DEEP_OCEAN: 1, SEA_ICE: 2, SNOW: 3, MOUNTAIN: 4, ICE: 5,
-  LAKE: 6, SALT_LAKE: 7, RIVER: 8,
-  TROPICAL_RAINFOREST: 9, SAVANNA: 10, DESERT: 11,
-  TEMPERATE_FOREST: 12, GRASSLAND: 13, SHRUBLAND: 14, TAIGA: 15, TUNDRA: 16,
-};
-const BIOME_NAME = ['海洋', '深海', '海冰', '雪峰', '山脉', '冰原', '湖泊', '咸水湖', '河流',
-  '热带雨林', '稀树草原', '沙漠', '温带森林', '草原', '灌丛', '泰加林', '苔原'];
-
-/**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript —— 分配地形标量场（SoA）。
- * Godot 侧对应一组 PackedFloat32Array / PackedInt32Array。
- */
-function createTerrain(verts, faces, dual, neighbors, cfg) {
-  const n = verts.length, nT = faces.length;
-  return {
-    n,
-    /* 拓扑（只读） */
-    center: verts,
-    faces,
-    neighbors,
-    regionTris: dual.regionTris,
-    triCenters: dual.triCenters,
-    triAcross: dual.triAcross,
-    nT,
-
-    /* 步 1–2 海拔与山脉 */
-    elevationRaw: new Float64Array(n),
-    elevation: new Float64Array(n),
-    continent: new Float64Array(n),     // ★ 大陆掩码 [0,1]（0 = 大洋，1 = 大陆腹地）
-    mountainDist: new Float64Array(n),
-    mountainStrength: new Float64Array(n),
-    mountain: new Float64Array(n),
-
-    /* 步 3–5 气候 */
-    temperature: new Float64Array(n),
-    wind: new Float64Array(n * 3),
-    humidity: new Float64Array(n),
-    rainfall: new Float64Array(n),
-    moisture: new Float64Array(n),
-
-    /* 步 6–8 水文 */
-    downslope: new Int32Array(n).fill(-1),
-    filled: new Float64Array(n),
-    floodOrder: new Int32Array(n),
-    floodCount: 0,
-    lakeDepth: new Float64Array(n),
-    flow: new Float64Array(n),
-    area: new Int32Array(n),          // ★ 上游汇水面积（含自身，单位：格）
-    waterLevel: new Float64Array(n),
-    isLake: new Uint8Array(n),
-    isEndorheic: new Uint8Array(n),
-    isRiver: new Uint8Array(n),
-
-    /* 步 9 生物群系 + 渲染派生 */
-    biome: new Uint8Array(n),
-    shade: new Float32Array(n),
-  };
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 1：基础海拔场（FBM 脊线变换 + 可选岛屿掩码）。
- * 只写 elevationRaw；山脉要等步 2 的距离场，之后由 applyMountainRidge 融合。
- */
-function assignElevation(T, cfg, rng) {
-  const t = cfg.terrain;
-  const nBase = makeNoise3D(cfg.seed ^ 0x1a2b3c4d);
-  const fbmBase = makeFbm(nBase, t.octaves, t.lacunarity, t.persistence);
-  const nDetail = makeNoise3D(cfg.seed ^ 0x7f4a7c15);
-  const fbmDetail = makeFbm(nDetail, 2, 2.0, 0.5);
-  // ★ 大陆包络 FBM（低频）：只用来算「掩码」，不加进海拔（见 CONFIG.terrain 注释）
-  const nCont = makeNoise3D(cfg.seed ^ 0x0c0ffee1);
-  const fbmCont = makeFbm(nCont, t.continentOctaves, 2.0, 0.5);
-  const cAmp = clamp(t.continentAmp, 0, 1);
-  for (let i = 0; i < T.n; i++) {
-    const c = T.center[i];
-    // ① 大陆与丘陵：平滑 FBM
-    let e = 0.5 + 0.9 * fbmBase(c[0] * t.noiseScale + 11.3, c[1] * t.noiseScale + 7.7, c[2] * t.noiseScale + 3.1);
-    // ② 细节粗糙度：高频低幅，在网格尺度上制造封闭洼地 → 湖泊
-    e += t.detailAmp * fbmDetail(c[0] * t.detailScale + 5.7, c[1] * t.detailScale + 2.3, c[2] * t.detailScale + 9.1);
-    T.elevationRaw[i] = e;
-    // ③ 大陆包络（原始值，暂存）——海拔本身不动，掩码在 z-score 之后才生效
-    T.continent[i] = cAmp > 0
-      ? fbmCont(c[0] * t.continentScale + 23.1, c[1] * t.continentScale + 5.9, c[2] * t.continentScale + 17.7)
-      : 0;
-  }
-  // ④ 包络 → 掩码：先归一化成 z-score，再按「标准差单位」过阈值。
-  //    这样 continentBias / continentBand 的含义与噪声幅度无关（可移植、可复现）；
-  //    continentAmp 是 0–1 的强度混合：0 → 掩码恒为 1（= 关闭，回到 M2 迷宫），1 → 满强度。
-  if (cAmp > 0) {
-    let m = 0;
-    for (let i = 0; i < T.n; i++) m += T.continent[i];
-    m /= T.n;
-    let v = 0;
-    for (let i = 0; i < T.n; i++) { const d = T.continent[i] - m; v += d * d; }
-    const sdEnv = Math.sqrt(v / T.n) || 1e-9;
-    const lo = t.continentBias - t.continentBand;
-    const hi = t.continentBias + t.continentBand;
-    for (let i = 0; i < T.n; i++) {
-      const mz = smoothstep(lo, hi, (T.continent[i] - m) / sdEnv);
-      T.continent[i] = 1 - cAmp * (1 - mz);
-    }
-  } else {
-    T.continent.fill(1);
-  }
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 2a：Poisson-disk 撒峰点（球面）。
- * 简化版拒绝采样：候选点均匀撒在球面上，与已存活峰点的球面弦距 < spacing 即拒绝。
- */
-function placeMountainPeaks(T, cfg, rng) {
-  const t = cfg.terrain;
-  const noise = makeNoise3D(cfg.seed ^ 0x9e3779b9);
-  const spacing = t.mountainSpacing;
-  const peaks = [];
-  const tries = 26000;
-  for (let k = 0; k < tries; k++) {
-    if (rng() > t.mountainDensity) continue;
-    const z = rng() * 2 - 1;
-    const th = rng() * Math.PI * 2;
-    const r = Math.sqrt(Math.max(0, 1 - z * z));
-    const p = [r * Math.cos(th), z, r * Math.sin(th)];
-    let ok = true;
-    for (let m = 0; m < peaks.length; m++) {
-      if (v3Dist(peaks[m].p, p) < spacing) { ok = false; break; }
-    }
-    if (!ok) continue;
-    const s = 0.5 + 0.5 * clamp(0.5 + 0.5 * noise(p[0] * 3.1, p[1] * 3.1, p[2] * 3.1), 0, 1);
-    peaks.push({ p, strength: s });
-  }
-  return peaks;
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 2b：多源 Dijkstra 距离场（最小堆），
- * 每个 region 记录自己归属于哪个峰点（mountainStrength）与到峰点的球面距离。
- */
-function mountainDistanceField(T, peaks, cfg, rng) {
-  const t = cfg.terrain;
-  const heap = new MinHeap();
-  T.mountainDist.fill(Infinity);
-  T.mountainStrength.fill(0);
-
-  for (const pk of peaks) {
-    // 峰点吸附到最近的 region 中心
-    let best = -1, bd = Infinity;
-    for (let i = 0; i < T.n; i++) {
-      const d = v3Dist(T.center[i], pk.p);
-      if (d < bd) { bd = d; best = i; }
-    }
-    if (best >= 0 && bd < T.mountainDist[best]) {
-      T.mountainDist[best] = bd;
-      T.mountainStrength[best] = pk.strength;
-      heap.push(best, bd);
-    }
-  }
-  heap.clear();
-  for (let i = 0; i < T.n; i++) {
-    if (T.mountainDist[i] < Infinity) heap.push(i, T.mountainDist[i]);
-  }
-
-  while (heap.size > 0) {
-    const c = heap.pop();
-    const dc = T.mountainDist[c];
-    const nb = T.neighbors[c];
-    for (let k = 0; k < nb.length; k++) {
-      const j = nb[k];
-      const d = dc + sphereEdgeLength(T.center[c], T.center[j]);
-      if (d < T.mountainDist[j]) {
-        T.mountainDist[j] = d;
-        T.mountainStrength[j] = T.mountainStrength[c];
-        heap.push(j, d);
-      }
-    }
-  }
-
-  // 距离 → 山脉权重 [0,1]
-  for (let i = 0; i < T.n; i++) {
-    const d = T.mountainDist[i] === Infinity ? t.mountainWidth : T.mountainDist[i];
-    const fall = smoothstep(0, 1, clamp(1 - d / t.mountainWidth, 0, 1));
-    T.mountain[i] = T.mountainStrength[i] * fall;
-  }
-  return peaks.length;
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 2c：把山脉融进海拔，并全局 z-score 标准化到 [0,1]。
- * z-score 让「陆地占比」与 mountainSharpness 解耦（面板调参数不会把球全淹了）。
- */
-function applyMountainRidge(T, cfg) {
-  const t = cfg.terrain;
-  const sharp = t.mountainSharpness / 10;               // 0.6 .. 1.4
-  const nRidge = makeNoise3D(cfg.seed ^ 0x2545f491);
-  const fbmRidge = makeFbm(nRidge, 4, 2.2, 0.5);
-  for (let i = 0; i < T.n; i++) {
-    const w = T.mountain[i];
-    const c = T.center[i];
-    // 山脉脊线：ridged multifractal，只在山脉权重高的地方生效
-    const ridgeN = 1 - Math.abs(fbmRidge(c[0] * t.ridgeScale, c[1] * t.ridgeScale, c[2] * t.ridgeScale));
-    const lift = sharp * Math.pow(w, 1.4) * (t.ridgeAmp * ridgeN * ridgeN + 0.10);
-    T.elevationRaw[i] += lift;
-  }
-  // 全局 z-score 标准化：让「陆地占比」与 mountainSharpness 解耦
-  let mean = 0;
-  for (let i = 0; i < T.n; i++) mean += T.elevationRaw[i];
-  mean /= T.n;
-  let varr = 0;
-  for (let i = 0; i < T.n; i++) { const d = T.elevationRaw[i] - mean; varr += d * d; }
-  const sd = Math.sqrt(varr / T.n) || 1e-9;
-  for (let i = 0; i < T.n; i++) {
-    const z = (T.elevationRaw[i] - mean) / sd;
-    // ★ 大陆掩码在这里生效（z-score **之后**，所以不会被消掉）：
-    //   大陆内部抬 landLift、大陆外压 oceanDepth。掩码是 [0,1] 的连续量，
-    //   过渡带内两股力互相抵消 → 海岸线落在掩码的等值线上，再由 base FBM 的分形细节打碎。
-    const C = t.continentAmp > 0 ? T.continent[i] : 1;
-    const dz = t.continentAmp > 0 ? (t.continentLandLift * C - t.oceanDepth * (1 - C)) : 0;
-    // ★ 下界放开到 -1：掩码把大洋「推深」后海拔会降到 0 以下，若仍 clamp 到 0，
-    //   则 seaLevel < 0 时全球都会变成陆地（掩码的海洋会被 clamp 吃掉）。
-    T.elevation[i] = clamp(t.elevationCenter + z * t.elevationSpread + dz, -1, 1);
-  }
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 3：温度。
- * T = cos(纬度) − landRelief · lapseRate + 抖动
- * 用「陆地相对高度」而不是绝对海拔：海面下的格子温度只由纬度决定，
- * 否则深海会被算成极寒，海冰带会长得很怪。
- */
-function assignTemperature(T, cfg) {
-  const t = cfg.terrain;
-  const noise = makeNoise3D(cfg.seed ^ 0x85ebca6b);
-  for (let i = 0; i < T.n; i++) {
-    const c = T.center[i];
-    const latFactor = Math.sqrt(Math.max(0, 1 - c[1] * c[1]));               // = cos(纬度)
-    const landRelief = clamp((T.elevation[i] - cfg.seaLevel) / (1 - cfg.seaLevel), 0, 1);
-    const jitter = noise(c[0] * 2.3, c[1] * 2.3, c[2] * 2.3) * t.tempJitter;
-    T.temperature[i] = clamp(latFactor - landRelief * t.lapseRate + jitter, 0, 1);
-  }
-}
-
-/** [Godot-ready] 纯算法 —— 纬向风带的带内因子：-1 = 东风，+1 = 西风（在 30°/60° 平滑过渡） */
-function zonalBandFactor(absLatDeg) {
-  const s1 = smoothstep(24, 36, absLatDeg);   // 信风 → 西风
-  const s2 = smoothstep(52, 68, absLatDeg);   // 西风 → 极地东风
-  return -1 + 2 * s1 - 2 * s2;
-}
-/** [Godot-ready] 纯算法 —— 经向分量符号：低纬向赤道、中纬向极、高纬向赤道（已按半球取反） */
-function zonalMeridionalFactor(absLatDeg, isNorth) {
-  let m;
-  if (absLatDeg < 30) m = -1;
-  else if (absLatDeg < 60) m = 1;
-  else m = -1;
-  return isNorth ? m : -m;
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 4：风场。
- * zonal（默认）= 三圈环流；uniform = 全局单向（调试选项，用来对照「单向风造不出沙漠」）。
- * 风必须投影到球面切平面，否则水汽会「吹出球外」。
- */
-function assignWind(T, cfg) {
-  const cl = cfg.climate;
-  const UP = [0, 1, 0];
-  for (let i = 0; i < T.n; i++) {
-    const n = T.center[i];
-    const [t1, t2] = v3PerpBasis(n);          // 极点安全的切平面正交基
-    let dir;
-    if (cl.windMode === 'uniform') {
-      dir = cl.windUniformDir;
-    } else {
-      const y = clamp(n[1], -1, 1);
-      const latDeg = Math.asin(y) * 180 / Math.PI;
-      const absLat = Math.abs(latDeg);
-      // 东向：cross(UP, n)；在极点处退化 → 退回基向量 t1
-      let east = v3Cross(UP, n);
-      east = v3Len(east) < 1e-6 ? t1 : v3Norm(east);
-      const north = v3Norm(v3Cross(n, east));
-      dir = v3Add(
-        v3Mul(east, zonalBandFactor(absLat)),
-        v3Mul(north, cl.windMeridional * zonalMeridionalFactor(absLat, y >= 0)),
-      );
-    }
-    // 投影到切平面并归一化（风必须贴着球面吹）
-    let w = v3Sub(dir, v3Mul(n, v3Dot(dir, n)));
-    if (v3Len(w) < 1e-9) w = t1;              // 兜底：任何情况下都不是零向量
-    w = v3Norm(w);
-    T.wind[i * 3] = w[0]; T.wind[i * 3 + 1] = w[1]; T.wind[i * 3 + 2] = w[2];
-  }
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 5 辅助：纬向气候学解析解（暖启动初值）。
- * 与温度模型同源；用来把迭代初值放到「大致正确」的位置，实测省约 35% 迭代。
- */
-function climatologyRain(T, i, cfg) {
-  const cl = cfg.climate;
-  const latDeg = Math.asin(clamp(T.center[i][1], -1, 1)) * 180 / Math.PI;
-  const a = Math.abs(latDeg);
-  const itcz = Math.exp(-Math.pow(a / 12, 2));
-  const mid = Math.exp(-Math.pow((a - 52) / 18, 2)) * 0.55;
-  const polar = Math.exp(-Math.pow((a - 85) / 16, 2)) * 0.15;
-  const sub = Math.exp(-Math.pow((a - cl.subtropicalLat) / cl.subtropicalWidth, 2)) * cl.subtropicalStrength;
-  return clamp(cl.raininess * (itcz + mid + polar - sub) * cl.convectiveRain, 0, 1);
-}
-
-/**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript —— 步 5：降雨（迭代松弛）。
+ * 求对偶图，得到 Goldberg 多面体。
  *
- * 球面上无法像 mapgen4 那样「按风向排序一遍扫描收敛」——纬向风带旋度非零，
- * 构造不出 DAG，必须迭代。
+ * 返回值契约：
+ *   dualPos  : Vector3[]  长度 = faces.length，每个元素是某三角形的归一化重心
+ *   polygons : [{ center, vertexIndices }]
+ *     - center        : 对应的原网格顶点（单位向量），即对偶面的中心
+ *     - vertexIndices : 环形排序后指向 dualPos 的下标，长度为 5 或 6
  *
- * 公式结构照搬 mapgen4 `assignRainfall`（humidity 是状态、rainfall 是输出，
- * biome 采样的是 rainfall），只做两处球面化改造：
- *   ①「平面图的边界海洋」→「海洋向温度决定的饱和湿度松弛」（暖海蒸发快、冷海几乎不蒸发）
- *   ② 新增「副热带下沉脱湿」——沙漠带唯一造得出来的路径
- * mapgen4 的雨影判据 `humidity > 1 − elevation` 原样保留，它就是「容量 = 1 − 陆地相对高度」。
- */
-function solveRainfall(T, cfg) {
-  const cl = cfg.climate;
-  const gs = cl.rainSolver === 'gaussSeidel';
-  const s = cfg.seaLevel;
-  const oneMS = 1 / (1 - s);
-
-  // 暖启动：纬向气候学解
-  for (let i = 0; i < T.n; i++) T.humidity[i] = climatologyRain(T, i, cfg);
-  const prev = new Float64Array(T.n);
-
-  let iter = 0, residual = Infinity;
-  while (iter < cl.rainMaxIter && residual > cl.rainTolerance) {
-    if (!gs) prev.set(T.humidity);                 // Jacobi：读上一轮
-    residual = 0;
-    for (let i = 0; i < T.n; i++) {
-      const src = gs ? T.humidity : prev;
-      const nb = T.neighbors[i], ci = T.center[i];
-      const wx = T.wind[i * 3], wy = T.wind[i * 3 + 1], wz = T.wind[i * 3 + 2];
-
-      // ① 平流：沿风的上游邻居按投影加权平均
-      let sum = 0, wsum = 0;
-      for (let k = 0; k < nb.length; k++) {
-        const j = nb[k], cj = T.center[j];
-        const proj = (cj[0] - ci[0]) * wx + (cj[1] - ci[1]) * wy + (cj[2] - ci[2]) * wz;
-        if (proj >= 0) continue;                   // 只看上游
-        const w = -proj;
-        sum += src[j] * w; wsum += w;
-      }
-      let humidity = wsum > 1e-9 ? sum / wsum : src[i];
-
-      // ② 平流水汽本身降下的雨（mapgen4: rainfall += raininess * humidity）
-      let rainfall = cl.raininess * humidity * cl.convectiveRain;
-
-      // ②b ★ 中纬风暴带降水（极锋辐合带）：
-      //    西风带把海洋水汽送到中纬陆地，锋面辐合抬升 → 降水正比于「本地湿度 × 风暴带权重」。
-      //    ★ 为什么必须有这一项：其它各项的蒸发能力都 ∝ T = cos(纬度)（见 ③ 的 warm），
-      //      于是湿度随纬度**单调下降**，中纬永远比副热带干 —— 三圈环流里
-      //      「赤道湿 / 副热带干 / 中纬次湿 / 极地干」的中间那一环就消失了。
-      const latDeg0 = Math.abs(Math.asin(clamp(ci[1], -1, 1)) * 180 / Math.PI);
-      const dStorm = (latDeg0 - cl.stormTrackLat) / cl.stormTrackWidth;
-      rainfall += cl.raininess * cl.stormTrack * Math.exp(-dStorm * dStorm) * humidity * cl.convectiveRain;
-
-      // ③ 蒸发：海洋向温度决定的饱和湿度松弛（暖海快、冷海慢 → 极地海洋也干）；
-      //    陆地另有一项弱得多的「陆面蒸发」（植被 / 土壤 / 内陆水体）。
-      //    ★ 这一项是「大陆内部不至于干到 0」的唯一来源：没有它，水汽从海岸一路降完，
-      //      超级大陆的腹地会整块变成沙漠（实测 moisture 中位数从 0.17 掉到 0.007）。
-      const e = T.elevation[i];
-      const warm = Math.pow(T.temperature[i], cl.evaporationExponent);
-      if (e <= s) {
-        const sat = cl.saturationFloor + (1 - cl.saturationFloor) * warm;
-        humidity += (sat - humidity) * cl.oceanEvaporation;
-      } else if (cl.landEvaporation > 0) {
-        const satLand = cl.landSaturation * warm;      // 暖地蒸发强、寒地弱（极地依旧干）
-        humidity += (satLand - humidity) * cl.landEvaporation;
-      }
-
-      // ④ 副热带下沉脱湿：直接降低湿度，干燥随下风向传播（沙漠靠这一步）
-      const latDeg = Math.abs(Math.asin(clamp(ci[1], -1, 1)) * 180 / Math.PI);
-      const dd = (latDeg - cl.subtropicalLat) / cl.subtropicalWidth;
-      const subsidence = Math.exp(-dd * dd) * cl.subtropicalStrength;
-      humidity *= (1 - subsidence);
-
-      // ⑤ 地形雨影：容量 = 1 − 陆地相对高度，超出容量的部分降下来（mapgen4 原判据）
-      const relief = e > s ? (e - s) * oneMS : 0;
-      const capacity = clamp(1 - relief, 0.05, 1);
-      if (humidity > capacity) {
-        const drop = cl.rainShadow * (humidity - capacity);
-        rainfall += cl.raininess * drop;
-        humidity -= drop;
-      }
-      humidity = clamp(humidity, 0, 1);
-
-      const delta = Math.abs(humidity - T.humidity[i]);
-      if (delta > residual) residual = delta;
-      T.humidity[i] = humidity;
-      T.rainfall[i] = rainfall;
-    }
-    iter++;
-  }
-
-  normalizeMoisture(T, cfg);
-  let maxR = 1e-9, maxH = 1e-9;
-  for (let i = 0; i < T.n; i++) {
-    if (T.rainfall[i] > maxR) maxR = T.rainfall[i];
-    if (T.humidity[i] > maxH) maxH = T.humidity[i];
-  }
-  return { iterations: iter, residual, maxRainfall: maxR, maxHumidity: maxH };
-}
-
-/** [Godot-ready] 纯算法 —— moisture = clamp(rainfall / rainReference, 0, 1) */
-function normalizeMoisture(T, cfg) {
-  const ref = cfg.climate.rainReference;
-  for (let i = 0; i < T.n; i++) T.moisture[i] = clamp(T.rainfall[i] / ref, 0, 1);
-}
-
-/**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript —— 步 6：priority-flood（Barnes 2014）。
- * 种子 = 海洋格；最小堆按高程扩展；filled 是「填平后的高程」，
- * filled − elevation 就是本格能被填多深 = 湖深。
- * floodOrder 是堆的出场顺序，天然按 filled 升序，正好是流量累积需要的「叶 → 根」。
- */
-function priorityFlood(T, cfg) {
-  const heap = new MinHeap();
-  const inOrder = new Uint8Array(T.n);
-  T.filled.fill(Infinity);
-  T.downslope.fill(-1);
-  T.floodCount = 0;
-
-  const seed = (i) => {
-    if (T.filled[i] !== Infinity) return;
-    T.filled[i] = T.elevation[i];
-    T.downslope[i] = -1;
-    heap.push(i, T.elevation[i]);
-  };
-  for (let i = 0; i < T.n; i++) if (T.elevation[i] <= cfg.seaLevel) seed(i);
-
-  while (heap.size > 0) {
-    const c = heap.pop();
-    if (!inOrder[c]) { inOrder[c] = 1; T.floodOrder[T.floodCount++] = c; }
-    const nb = T.neighbors[c];
-    for (let k = 0; k < nb.length; k++) {
-      const j = nb[k];
-      if (T.filled[j] !== Infinity) continue;
-      const f = Math.max(T.elevation[j], T.filled[c]);
-      T.filled[j] = f;
-      T.downslope[j] = c;
-      heap.push(j, f);
-    }
-  }
-
-  // 兜底：无海洋种子的球（全陆地球），剩余格子各自作为盆地根
-  if (T.floodCount < T.n) {
-    for (let i = 0; i < T.n; i++) {
-      if (T.filled[i] === Infinity) {
-        T.filled[i] = T.elevation[i];
-        T.downslope[i] = -1;
-        heap.push(i, T.elevation[i]);
-      }
-    }
-    while (heap.size > 0) {
-      const c = heap.pop();
-      if (!inOrder[c]) { inOrder[c] = 1; T.floodOrder[T.floodCount++] = c; }
-      const nb = T.neighbors[c];
-      for (let k = 0; k < nb.length; k++) {
-        const j = nb[k];
-        if (T.filled[j] !== Infinity) continue;
-        const f = Math.max(T.elevation[j], T.filled[c]);
-        T.filled[j] = f;
-        T.downslope[j] = c;
-        heap.push(j, f);
-      }
-    }
-  }
-  return { flooded: T.floodCount };
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 7：湖泊与内流盆地。
- * 填平量 filled − elevation 就是湖深；湖面画在 filled 上，地形画在 elevation 上。
- * isEndorheic 是「气候代理判据」（流域平均降雨低于阈值 → 水体不外流），不是拓扑判据：
- * priority-flood 保证每个格子的下坡链最终都到海洋，严格意义上不存在无出口的洼地。
- */
-function detectLakes(T, cfg) {
-  const h = cfg.hydro;
-  T.lakeDepth.fill(0);
-  T.isEndorheic.fill(0);
-  let lakeCount = 0, maxDepth = 0;
-
-  for (let i = 0; i < T.n; i++) {
-    const isLand = T.elevation[i] > cfg.seaLevel;
-    const depth = T.filled[i] - T.elevation[i];
-    T.waterLevel[i] = T.filled[i];
-    if (!isLand) { T.isLake[i] = 0; continue; }
-    T.lakeDepth[i] = depth;
-    T.isLake[i] = depth > h.lakeMinDepth ? 1 : 0;
-    if (T.isLake[i]) { lakeCount++; if (depth > maxDepth) maxDepth = depth; }
-  }
-
-  // 连通湖泊 → 流域平均降雨 → 内流标记
-  const seen = new Uint8Array(T.n);
-  const stack = [];
-  let endoBasins = 0;
-  for (let s = 0; s < T.n; s++) {
-    if (!T.isLake[s] || seen[s]) continue;
-    stack.length = 0; stack.push(s); seen[s] = 1;
-    const comp = [];
-    while (stack.length) {
-      const c = stack.pop();
-      comp.push(c);
-      const nb = T.neighbors[c];
-      for (let k = 0; k < nb.length; k++) {
-        const j = nb[k];
-        if (T.isLake[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
-      }
-    }
-    let rainSum = 0;
-    for (const c of comp) rainSum += T.rainfall[c];
-    const mean = rainSum / comp.length;
-    if (mean < h.endorheicRain) {
-      endoBasins++;
-      for (const c of comp) T.isEndorheic[c] = 1;
-    }
-  }
-  return { lakeCount, maxDepth, endoBasins };
-}
-
-/**
- * [Godot-ready] 纯算法 —— 步 8：流量累积 + 上游汇水面积。
- * ★ 必须反向遍历 floodOrder（叶 → 根）。写成正序会得到完全错误的结果
- *   （实测：正序 maxFlow 仅 0.6，正确值 4.07）。
- * 产流按湿度加权，所以沙漠里天然不会出现河流。
+ * 不变式：polygons.length === vertices.length，且 polygons[i] 对应 vertices[i]；
+ *         其中恰好 12 个多边形的 vertexIndices.length === 5（五边形）。
  *
- * 同时累出 `T.area`（上游汇水面积，单位 = 格）：只依赖 downslope 拓扑，
- * 与湿度/降雨无关，因此是**判断「是不是一条真正的河」更干净的判据**——
- * GIS 里的标准做法（contributing area threshold）。
- * `flow` 仍然保留：它更接近「流量」，适合做河宽渐变。
+ * 关键：这里只保存【索引】而不拷贝坐标，渲染坐标统一由 §5 的 renderPos 给出，
+ *      这是「顶点偏移不产生缝隙」的前提。
  */
-function accumulateFlow(T, cfg) {
-  const h = cfg.hydro;
-  T.flow.fill(0);
-  // 产流 = gain · moisture²（mapgen4: flow_t = riversParam.flow · moisture_t²）
-  // 沙漠 moisture≈0 → 产流≈0，所以沙漠里天然不会长出河流。
-  for (let i = 0; i < T.n; i++) {
-    const isLand = T.elevation[i] > cfg.seaLevel;
-    T.flow[i] = (isLand && !T.isLake[i]) ? h.flowGain * T.moisture[i] * T.moisture[i] : 0;
-    // ★ 面积：每块陆地为 1 格，海洋与湖面为 0（湖是汇，不往下游传）
-    T.area[i] = (isLand && !T.isLake[i]) ? 1 : 0;
+function buildDual(vertices, faces) {
+  // 1) 对偶顶点 = 每个三角形的归一化重心，索引与 faces 一一对应
+  const dualPos = faces.map(([a, b, c]) => new THREE.Vector3()
+    .add(vertices[a])
+    .add(vertices[b])
+    .add(vertices[c])
+    .divideScalar(3)
+    .normalize());
+
+  // 2) 原网格顶点 → 相邻三角形索引
+  const vertexFaces = Array.from({ length: vertices.length }, () => []);
+  faces.forEach((f, fi) => {
+    for (const vi of f) vertexFaces[vi].push(fi);
+  });
+
+  // 3) 每个原顶点生成一个对偶面（多边形）
+  const HELPER_X = new THREE.Vector3(1, 0, 0);
+  const HELPER_Y = new THREE.Vector3(0, 1, 0);
+  const U = new THREE.Vector3();
+  const W = new THREE.Vector3();
+  const D = new THREE.Vector3();
+
+  const polygons = [];
+  for (let vi = 0; vi < vertices.length; vi++) {
+    const n = vertices[vi];
+
+    // 构造切平面正交基。该构造恒满足 u × w = n，因此环序从球外看始终为逆时针。
+    const helper = Math.abs(n.x) < 0.9 ? HELPER_X : HELPER_Y;
+    U.crossVectors(helper, n).normalize();
+    W.crossVectors(n, U);
+
+    // 把相邻三角形重心投影到切平面，按极角排序得到环绕顺序
+    const ring = vertexFaces[vi].map((fi) => {
+      const p = dualPos[fi];
+      D.copy(p).addScaledVector(n, -p.dot(n));   // 去掉法线分量 → 切平面投影
+      return { fi, ang: Math.atan2(D.dot(W), D.dot(U)) };
+    });
+    ring.sort((x, y) => x.ang - y.ang);
+
+    polygons.push({
+      center: n.clone(),
+      vertexIndices: ring.map((x) => x.fi),
+    });
   }
-  // ★ 反向遍历 floodOrder（叶 → 根）
-  for (let k = T.floodCount - 1; k >= 0; k--) {
-    const i = T.floodOrder[k];
-    const d = T.downslope[i];
-    if (d >= 0) { T.flow[d] += T.flow[i]; T.area[d] += T.area[i]; }
-  }
-  let maxFlow = 0, riverCount = 0, maxArea = 0;
-  for (let i = 0; i < T.n; i++) {
-    if (T.flow[i] > maxFlow) maxFlow = T.flow[i];
-    if (T.area[i] > maxArea) maxArea = T.area[i];
-    const isRiver = (T.elevation[i] > cfg.seaLevel) && !T.isLake[i] && T.flow[i] >= h.riverThreshold;
-    T.isRiver[i] = isRiver ? 1 : 0;
-    if (isRiver) riverCount++;
-  }
-  return { maxFlow, riverCount, maxArea };
+
+  return { dualPos, polygons };
+}
+
+/* =========================================================================
+ * §4  地形生成
+ * ========================================================================= */
+
+/**
+ * 陆地隆起量：海面保持半径 1，陆地按海拔线性抬升。
+ *
+ * 注意：默认配置下 `enableHeightOffset` 为 false，本函数恒返回 0，
+ * 因此整个球面是半径严格为 1 的光滑球体（无任何高低起伏）。
+ * 保留这段实现，是为了将来若需要立体感可以直接开启。
+ */
+function displacement(elevation) {
+  if (!CONFIG.enableHeightOffset) return 0;
+  if (elevation <= CONFIG.seaLevel) return 0;         // 海洋压平
+  const t = (elevation - CONFIG.seaLevel) / (1 - CONFIG.seaLevel);
+  return t * CONFIG.heightScale;
 }
 
 /**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript —— 步 9：生物群系。
- * 与 mapgen4 的关键差别：湿度来自迭代求解出的 rainfall，不是解析式，
- * 所以雨影 / 内陆干旱 / 副热带沙漠会自动出现在分类结果里。
+ * 计算所有图块的海拔。
+ *
+ * 分两步：
+ *   1. 用「大陆噪声 + 细节噪声」混合出原始高度（连续、自然）；
+ *   2. 对全体样本做高斯标准化，把分布映射到可预测的范围。
+ *
+ * 第 2 步很关键：原始 FBM 的取值集中在均值附近，若直接使用，
+ * elevation 会挤在中段，海平面 0.35 会切出难以预期的海陆比。
+ * 标准化之后，elevationCenter / elevationSpread 两个参数就能
+ * 稳定地控制海陆比例与地形起伏强度。
  */
-function classifyBiome(T, i, cfg) {
-  const b = cfg.biome;
-  const e = T.elevation[i], t = T.temperature[i], m = T.moisture[i];
-  if (e <= cfg.seaLevel) {
-    if (t < b.tempSeaice) return BIOME.SEA_ICE;
-    return (e < cfg.seaLevel - cfg.render.deepWaterDepth) ? BIOME.DEEP_OCEAN : BIOME.OCEAN;
-  }
-  if (t < b.tempSnow) return BIOME.SNOW;
-  if (T.mountain[i] > b.mountainBiomeThreshold) return BIOME.MOUNTAIN;
-  if (t < b.tempIce) return BIOME.ICE;
-  if (T.isLake[i]) return T.isEndorheic[i] ? BIOME.SALT_LAKE : BIOME.LAKE;
-  if (T.isRiver[i]) return BIOME.RIVER;
-  if (t >= b.tempTropical) return m > b.moistWet ? BIOME.TROPICAL_RAINFOREST : (m > b.moistAridTropical ? BIOME.SAVANNA : BIOME.DESERT);
-  if (t >= b.tempWarm) return m > b.moistWet ? BIOME.TEMPERATE_FOREST : (m > b.moistDry ? BIOME.GRASSLAND : BIOME.SHRUBLAND);
-  if (t >= b.tempCool) return m > b.moistDry ? BIOME.TEMPERATE_FOREST : BIOME.SHRUBLAND;
-  if (t >= b.tempTundra) return m > b.moistDry ? BIOME.TAIGA : BIOME.TUNDRA;
-  return BIOME.TUNDRA;
-}
+function computeElevations(tiles) {
+  const raw = tiles.map((tile) => {
+    const pC = tile.center.clone().multiplyScalar(CONFIG.continentScale);
+    const pD = tile.center.clone().multiplyScalar(CONFIG.detailScale);
 
-/** [Godot-ready] 纯算法 —— 逐格分类 */
-function classifyAllBiomes(T, cfg) {
-  for (let i = 0; i < T.n; i++) T.biome[i] = classifyBiome(T, i, cfg);
-}
+    const continent01 = fbm3(pC, CONFIG.continentOctaves, 2.0, 0.5, OFFSET_A) * 0.5 + 0.5;
+    const detail01    = fbm3(pD, CONFIG.detailOctaves,    2.0, 0.5, OFFSET_B) * 0.5 + 0.5;
 
-/* ═══════════════════════════════════════════════════════════════════════
-   L0–L2 END —— 以上为纯算法层（零 THREE 依赖），可整段抽取做 headless 验证
-   ═══════════════════════════════════════════════════════════════════════ */
-/* ═══════════════════════════════════════════════════════════════════════
-   L3 draw —— 手绘风格渲染的数据准备
-   这一层在 Godot 中换管线（ArrayMesh / SurfaceTool），但语义一一对应。
-   ★ paletteAt 是算法层与渲染层唯一的接口。
-   ═══════════════════════════════════════════════════════════════════════ */
+    return CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
+  });
 
-/**
- * [Godot-ready] 纯算法 —— `#rrggbb` → [r,g,b] ∈ [0,1]。
- * L3 不能依赖 THREE.Color（要保持可整段抽取），所以自己解析。
- */
-function hexToRgb01(hex) {
-  const h = hex.charCodeAt(0) === 35 ? hex.slice(1) : hex;
-  return [
-    parseInt(h.slice(0, 2), 16) / 255,
-    parseInt(h.slice(2, 4), 16) / 255,
-    parseInt(h.slice(4, 6), 16) / 255,
-  ];
-}
+  // 统计均值与标准差
+  const mean = raw.reduce((s, v) => s + v, 0) / raw.length;
+  const variance = raw.reduce((s, v) => s + (v - mean) * (v - mean), 0) / raw.length;
+  const std = Math.sqrt(variance) || 1e-6;
 
-/**
- * [渲染层] 纸纹颗粒噪声。**固定种子**（与地形种子无关）——
- * 换地形种子时纸张本身不该变，这更像「同一张纸上画不同的图」。
- * 采样坐标用**顶点单位球方向**（不是屏幕坐标），所以颗粒牢牢贴在球面上，
- * 球自转时颗粒跟着转，不会出现「贴在屏幕上」的数码感。
- */
-const PAPER_NOISE = makeNoise3D(0x51a2e7);
-
-/** [Godot-ready] 纯算法 —— 分段线性色标插值 */
-function ramp(stops, x) {
-  if (x <= stops[0][0]) return stops[0][1].slice();
-  const last = stops[stops.length - 1];
-  if (x >= last[0]) return last[1].slice();
-  for (let i = 1; i < stops.length; i++) {
-    if (x <= stops[i][0]) {
-      const a = stops[i - 1], b = stops[i];
-      const t = (x - a[0]) / (b[0] - a[0] || 1e-9);
-      return [lerp(a[1][0], b[1][0], t), lerp(a[1][1], b[1][1], t), lerp(a[1][2], b[1][2], t)];
-    }
-  }
-  return last[1].slice();
-}
-
-/** [Godot-ready] 纯算法 —— 水的连续蓝渐变（浅 → 深），含 3 条亮蓝浅水带（向 mapgen4 colormap.ts 致敬） */
-function waterColorAt(elev, cfg) {
-  const s = cfg.seaLevel;
-  const d = clamp((s - elev) / s, 0, 1);
-  const c = ramp([
-    [0.00, [0.31, 0.60, 0.71]],
-    [0.16, [0.24, 0.48, 0.63]],
-    [0.45, [0.13, 0.25, 0.42]],
-    [1.00, [0.06, 0.09, 0.20]],
-  ], d);
-  const band = Math.exp(-Math.pow((d - 0.020) / 0.013, 2)) * 0.55
-             + Math.exp(-Math.pow((d - 0.055) / 0.015, 2)) * 0.34
-             + Math.exp(-Math.pow((d - 0.100) / 0.018, 2)) * 0.18;
-  const k = clamp(band, 0, 0.85);
-  return [lerp(c[0], 0.50, k), lerp(c[1], 0.80, k), lerp(c[2], 0.88, k)];
-}
-
-/* Whittaker 3×3 色标网格：行 = 温度（冷→热），列 = 湿度（干→湿） */
-const WHITTAKER = [
-  [[0.72, 0.72, 0.66], [0.55, 0.61, 0.59], [0.29, 0.42, 0.35]],
-  [[0.72, 0.67, 0.47], [0.60, 0.66, 0.37], [0.25, 0.49, 0.31]],
-  [[0.83, 0.74, 0.53], [0.55, 0.60, 0.28], [0.15, 0.42, 0.24]],
-];
-/** [Godot-ready] 纯算法 —— 温度 × 湿度 双线性插值 */
-function whittakerAt(tc, mc) {
-  const ti = clamp(Math.floor(tc), 0, 1), tj = Math.min(ti + 1, 2);
-  const tu = clamp(tc - ti, 0, 1);
-  const mi = clamp(Math.floor(mc), 0, 1), mj = Math.min(mi + 1, 2);
-  const mu = clamp(mc - mi, 0, 1);
-  const out = [0, 0, 0];
-  for (let c = 0; c < 3; c++) {
-    const a = lerp(WHITTAKER[ti][mi][c], WHITTAKER[ti][mj][c], mu);
-    const b = lerp(WHITTAKER[tj][mi][c], WHITTAKER[tj][mj][c], mu);
-    out[c] = lerp(a, b, tu);
-  }
-  return out;
-}
-
-/**
- * [Godot-ready] 纯算法，可直接翻译成 GDScript
- * ★★ 算法层 ↔ 渲染层唯一的接口，整个渲染层里最值得精心设计的一个函数 ★★
- *
- * 它是纯函数：无副作用、不读全局、只依赖入参和 CONFIG。
- * Godot 里可以原样复用（逐顶点 set_vertex_color），
- * 也可以预先烘成一张 3D 纹理（elev × temp × moist）交给着色器采样。
- * 两种方式都不需要改动算法层 —— 将来升级渲染（纸纹/光照/换风格）只需替换它。
- */
-function paletteAt(elev, temp, moist, cfg) {
-  const s = cfg.seaLevel;
-  if (elev <= s) return waterColorAt(elev, cfg);
-
-  const tc = clamp((temp - 0.22) / 0.72, 0, 1) * 2;   // 温度坐标 0..2
-  // ★ 湿度重映射是**渲染层**的取值调整，算法层的 moisture 一个字都不动。
-  //   实测陆地 moisture 中位数仅 0.17，线性映射会「满屏枯黄」，
-  //   所以这里做一次轻度提亮（gamma 0.7 + 增益 1.18）。
-  //   调这个函数不会改变任何因果链结果 —— 这正是「paletteAt 是唯一接口」的价值。
-  const mc = clamp(Math.pow(clamp(moist, 0, 1), 0.70) * 1.18, 0, 1) * 2;   // 湿度坐标 0..2
-  const c = whittakerAt(tc, mc);
-
-  // 雪线：极冷 / 高海拔都 fade 到雪白（赤道高山也能进这里 → 符合现实直觉）
-  const landN = clamp((elev - s) / (1 - s), 0, 1);
-  const snowT = clamp(Math.max(
-    1 - smoothstep(0.06, 0.26, temp),
-    smoothstep(cfg.biome.snowLine, 1.0, landN)), 0, 1);
-  // 雪色不用纯白（0.95）：hillshade 最大 1.17 会把它顶过 1.0 → 大片「曝白」，
-  // 雪原上看不到任何起伏。降到 0.85 左右并带一点冷色，high-light 就留在可显示区间内。
-  return [lerp(c[0], 0.845, snowT), lerp(c[1], 0.865, snowT), lerp(c[2], 0.905, snowT)];
-}
-
-/* 生物群系分类色（仅用于「生物群系」调试视图，和 paletteAt 是两条路） */
-const BIOME_VIEW_COLOR = [
-  [0.35, 0.56, 0.72], [0.15, 0.26, 0.42], [0.85, 0.90, 0.94],   // 海洋 深海 海冰
-  [0.92, 0.95, 0.97], [0.55, 0.52, 0.48], [0.86, 0.90, 0.93],   // 雪峰 山脉 冰原
-  [0.24, 0.50, 0.65], [0.18, 0.44, 0.45], [0.16, 0.44, 0.65],   // 湖泊 咸水湖 河流
-  [0.15, 0.42, 0.24], [0.55, 0.60, 0.28], [0.83, 0.74, 0.53],   // 雨林 稀树草原 沙漠
-  [0.24, 0.49, 0.30], [0.60, 0.66, 0.37], [0.72, 0.67, 0.47],   // 温带林 草原 灌丛
-  [0.24, 0.38, 0.31], [0.55, 0.61, 0.59],                        // 泰加林 苔原
-];
-
-/** 调试视图调色（非最终配色；M2 由 paletteAt 全面接管） */
-function viewColorAt(view, elev, temp, moist, flow, lakeDepth, logMaxFlow, cfg) {
-  const s = cfg.seaLevel;
-  if (view === 'elev') {
-    if (elev <= s) return waterColorAt(elev, cfg);
-    const n = clamp((elev - s) / (1 - s), 0, 1);
-    const g = 0.24 + 0.72 * Math.pow(n, 0.85);
-    return [g * 0.97, g, g * 1.03];
-  }
-  if (view === 'temp') {
-    if (elev <= s) return [0.10, 0.16, 0.27];
-    return ramp([[0, [0.24, 0.42, 0.78]], [0.30, [0.35, 0.72, 0.80]], [0.52, [0.55, 0.78, 0.42]],
-                 [0.74, [0.90, 0.78, 0.32]], [1, [0.82, 0.28, 0.22]]], clamp(temp, 0, 1));
-  }
-  if (view === 'rain') {
-    if (elev <= s) return [0.12, 0.18, 0.28];
-    // 用 sqrt 拉开低值区，否则副热带少雨带和内陆干旱区会糊成一片
-    const m = Math.sqrt(clamp(moist, 0, 1));
-    return ramp([[0, [0.94, 0.90, 0.72]], [0.35, [0.66, 0.82, 0.60]],
-                 [0.65, [0.30, 0.62, 0.60]], [1, [0.10, 0.28, 0.55]]], clamp(m, 0, 1));
-  }
-  if (view === 'flow') {
-    if (elev <= s) return [0.09, 0.14, 0.24];
-    const lit = clamp(Math.log1p(Math.max(0, flow)) / (logMaxFlow || 1), 0, 1);
-    const hot = ramp([[0, [0.35, 0.42, 0.45]], [0.5, [0.30, 0.65, 0.72]],
-                      [0.85, [0.95, 0.72, 0.25]], [1, [0.90, 0.22, 0.30]]], lit);
-    const t = clamp(lit * 1.6, 0, 1);
-    return [lerp(0.30, hot[0], t), lerp(0.31, hot[1], t), lerp(0.33, hot[2], t)];
-  }
-  if (view === 'terrain') return paletteAt(elev, temp, moist, cfg);
-  return [0.6, 0.6, 0.6];
-}
-
-/**
- * [渲染层] 逐 region 烘焙 map 式 hillshade。
- * 用切平面内的坡向 + 固定罗盘方位，所以：① 没有晨昏线（球不会被照亮一半）
- * ② 不随视角变化，可以直接烘进顶点色（Godot 侧同理）。
- */
-function bakeVertexShading(T, cfg) {
-  const R = cfg.render;
-  const zen = R.lightZenithDeg * Math.PI / 180;
-  const az = R.lightAzimuthDeg * Math.PI / 180;
-  const cz = Math.cos(zen), sz = Math.sin(zen);
-  // 坡度用海拔场梯度算，与几何起伏解耦：定稿把 reliefScale 归零后山脉依然清晰可见
-  const gain = R.shadeGain;
-  const UP = [0, 1, 0];
-  const ca = Math.cos(az), sa = Math.sin(az);
-
-  for (let i = 0; i < T.n; i++) {
-    const n = T.center[i];
-    const [e1, e2] = v3PerpBasis(n);
-    const nb = T.neighbors[i];
-
-    // 最小二乘拟合切平面内的海拔梯度 (gu, gv)
-    let Suu = 0, Suv = 0, Svv = 0, Suh = 0, Svh = 0;
-    for (let k = 0; k < nb.length; k++) {
-      const j = nb[k];
-      const d = v3Sub(T.center[j], n);
-      const u = v3Dot(d, e1), v = v3Dot(d, e2);
-      const dh = T.elevation[j] - T.elevation[i];
-      Suu += u * u; Suv += u * v; Svv += v * v; Suh += u * dh; Svh += v * dh;
-    }
-    const det = Suu * Svv - Suv * Suv;
-    let gu = 0, gv = 0;
-    if (Math.abs(det) > 1e-12) {
-      gu = (Svv * Suh - Suv * Svh) / det;
-      gv = (-Suv * Suh + Suu * Svh) / det;
-    }
-    const gm = Math.hypot(gu, gv);
-    const slope = Math.atan(gain * gm);
-
-    // 坡向（切平面内的单位向量）
-    let ghx = 0, ghy = 0, ghz = 0;
-    if (gm > 1e-12) {
-      const ux = gu / gm, uy = gv / gm;
-      ghx = e1[0] * ux + e2[0] * uy;
-      ghy = e1[1] * ux + e2[1] * uy;
-      ghz = e1[2] * ux + e2[2] * uy;
-    }
-
-    // 光照：切平面内的固定罗盘方位（极点处 north 退化 → 兜底用 e1）
-    let north = v3Sub(UP, v3Mul(n, v3Dot(UP, n)));
-    north = v3Len(north) < 1e-6 ? e1 : v3Norm(north);
-    const east = v3Norm(v3Cross(n, north));
-    const lx = north[0] * ca + east[0] * sa;
-    const ly = north[1] * ca + east[1] * sa;
-    const lz = north[2] * ca + east[2] * sa;
-
-    const cosDelta = ghx * lx + ghy * ly + ghz * lz;
-    const illum = cz * Math.cos(slope) + sz * Math.sin(slope) * cosDelta;
-    T.shade[i] = R.ambient + R.diffuse * clamp(illum, 0, 1.42);
-  }
-}
-
-/** [渲染层] 顶点球面半径：海面绝对平整；湖面画在 filled 上；陆地按海拔抬升 */
-function vertexRadius(T, i, cfg) {
-  const e = T.elevation[i], s = cfg.seaLevel;
-  const k = cfg.render.reliefScale / Math.max(1e-6, 1 - s);
-  if (e <= s) return 1;
-  if (T.isLake[i]) return 1 + k * (T.filled[i] - s);
-  return 1 + k * (e - s);
-}
-
-/**
- * [渲染层] 构造合并渲染网格（Godot: ArrayMesh + SurfaceTool）。
- *
- * 顶点 = region 中心（0..nR-1）+ 三角形重心（nR..nR+nT-1）。
- * 每个半边输出 1 个三角形，相对的两个半边拼成一个 quad：
- *   折向山谷 ⟺ 水边 或 有河流经过     →（r1, cen_t2, cen_t1）
- *   否则折向山脊                      →（r1, r2,    cen_t1）
- * 这是 mapgen4 geometry.ts#setMapGeometry 的球面版。
- *
- * 顶点色不做逐像素插值（没有 shader），而是「逐顶点先插标量、再查 palette」，
- * 这样分类色不会在三角形里被调成泥巴色。
- */
-function buildRenderMesh(T, cfg) {
-  const nR = T.n, nT = T.nT, vCount = nR + nT;
-  const positions = new Float32Array(vCount * 3);
-  const colors = new Float32Array(vCount * 3);
-  const index = new Uint32Array(nT * 9);
-  const triToRegion = new Int32Array(nT * 3);
-  const triRegions = new Int32Array(nT * 3);
-
-  const vElev = new Float32Array(vCount);
-  const vTemp = new Float32Array(vCount);
-  const vMoist = new Float32Array(vCount);
-  const vFlow = new Float32Array(vCount);
-  const vLake = new Float32Array(vCount);
-  const vSalt = new Float32Array(vCount);
-  const vShade = new Float32Array(vCount);
-
-  // ① region 顶点
-  const rad = new Float32Array(nR);
-  for (let r = 0; r < nR; r++) {
-    const c = T.center[r], k = vertexRadius(T, r, cfg);
-    rad[r] = k;
-    positions[r * 3] = c[0] * k; positions[r * 3 + 1] = c[1] * k; positions[r * 3 + 2] = c[2] * k;
-    vElev[r] = T.elevation[r]; vTemp[r] = T.temperature[r]; vMoist[r] = T.moisture[r];
-    vFlow[r] = T.flow[r]; vLake[r] = T.lakeDepth[r]; vShade[r] = T.shade[r];
-    vSalt[r] = T.isEndorheic[r];
-  }
-
-  // ② 三角形顶点（重心），标量取三个 region 的平均
-  for (let t = 0; t < nT; t++) {
-    const v = nR + t, f = T.faces[t];
-    const a = f[0], b = f[1], c = f[2];
-    triRegions[t * 3] = a; triRegions[t * 3 + 1] = b; triRegions[t * 3 + 2] = c;
-    const cen = T.triCenters[t], k = (rad[a] + rad[b] + rad[c]) / 3;
-    positions[v * 3] = cen[0] * k; positions[v * 3 + 1] = cen[1] * k; positions[v * 3 + 2] = cen[2] * k;
-    vElev[v] = (T.elevation[a] + T.elevation[b] + T.elevation[c]) / 3;
-    vTemp[v] = (T.temperature[a] + T.temperature[b] + T.temperature[c]) / 3;
-    vMoist[v] = (T.moisture[a] + T.moisture[b] + T.moisture[c]) / 3;
-    vFlow[v] = (T.flow[a] + T.flow[b] + T.flow[c]) / 3;
-    vLake[v] = (T.lakeDepth[a] + T.lakeDepth[b] + T.lakeDepth[c]) / 3;
-    vSalt[v] = (T.isEndorheic[a] + T.isEndorheic[b] + T.isEndorheic[c]) / 3;
-    vShade[v] = (T.shade[a] + T.shade[b] + T.shade[c]) / 3;
-  }
-
-  // ③ 索引：每个半边出 1 个三角形（3 个半边/面 × 3 顶点 = 9）
-  let k = 0, fi = 0;
-  for (let t = 0; t < nT; t++) {
-    const f = T.faces[t];
-    for (let i = 0; i < 3; i++) {
-      const r1 = f[i], r2 = f[(i + 1) % 3];
-      const t2 = T.triAcross[3 * t + i];
-      const valley = t2 >= 0 && (
-        T.elevation[r1] <= cfg.seaLevel || T.elevation[r2] <= cfg.seaLevel ||
-        T.isRiver[r1] === 1 || T.isRiver[r2] === 1);
-      if (valley) { index[k++] = r1; index[k++] = nR + t2; index[k++] = nR + t; }
-      else { index[k++] = r1; index[k++] = r2; index[k++] = nR + t; }
-      triToRegion[fi++] = r1;
-    }
-  }
-
-  return {
-    nR, nT, vCount, positions, colors, index, triToRegion, triRegions,
-    vElev, vTemp, vMoist, vFlow, vLake, vSalt, vShade,
-  };
-}
-
-/**
- * [渲染层] 重算逐顶点颜色（切换调试视图 / 调 riverThreshold 时只跑这一步，不重跑因果链）。
- * triToRegion 是 faceIndex → region 的 O(1) 查表：因为三角形是按半边发射的，
- * 每个 region 的三角形并不是连续区间，所以用查表而不是区间。
- *
- * M2 改成两段式：
- *   ① 逐顶点先算「底色」（调试视图色 / 地形色 + 湖河叠色）
- *   ② 统一叠**纸纹颗粒 + 纸底色混合**，再乘烘焙光照
- * 这样纸纹对**所有视图**生效（对着色一致的「同一张纸」的感觉），
- * 而且算法层完全不知道纸纹的存在。
- */
-function refreshVertexColors(S, T, cfg) {
-  const nR = S.nR, nT = S.nT, col = S.colors, vCount = S.vCount;
-  const logMaxFlow = Math.log1p(Math.max(1e-6, S.maxFlow || 1));
-  const P = cfg.render;
-
-  const rgb = S._rgb || (S._rgb = new Float32Array(vCount * 3));
-
-  if (cfg.view === 'biome') {
-    // 分类视图：逐 region 上色 → 三角形顶点取三个 region 的平均色
-    const rc = S._rc || (S._rc = new Float32Array(nR * 3));
-    for (let r = 0; r < nR; r++) {
-      const c = BIOME_VIEW_COLOR[T.biome[r]] || [0.6, 0.6, 0.6];
-      rc[r * 3] = c[0]; rc[r * 3 + 1] = c[1]; rc[r * 3 + 2] = c[2];
-    }
-    for (let r = 0; r < nR; r++) {
-      rgb[r * 3] = rc[r * 3]; rgb[r * 3 + 1] = rc[r * 3 + 1]; rgb[r * 3 + 2] = rc[r * 3 + 2];
-    }
-    for (let t = 0; t < nT; t++) {
-      const v = nR + t, a = S.triRegions[t * 3], b = S.triRegions[t * 3 + 1], c = S.triRegions[t * 3 + 2];
-      rgb[v * 3] = (rc[a * 3] + rc[b * 3] + rc[c * 3]) / 3;
-      rgb[v * 3 + 1] = (rc[a * 3 + 1] + rc[b * 3 + 1] + rc[c * 3 + 1]) / 3;
-      rgb[v * 3 + 2] = (rc[a * 3 + 2] + rc[b * 3 + 2] + rc[c * 3 + 2]) / 3;
-    }
-  } else {
-    const lakeRGB = hexToRgb01(P.lakeColor);
-    const saltRGB = hexToRgb01(P.saltLakeColor);
-    const riverRGB = hexToRgb01(P.riverColor);
-    for (let v = 0; v < vCount; v++) {
-      let c = viewColorAt(cfg.view, S.vElev[v], S.vTemp[v], S.vMoist[v], S.vFlow[v], S.vLake[v], logMaxFlow, cfg);
-      // 湖 / 河叠色（paletteAt 保持纯函数，这层语义放在调用侧）
-      const e = S.vElev[v];
-      if (e > cfg.seaLevel) {
-        if (S.vLake[v] > cfg.hydro.lakeMinDepth * 0.6 && cfg.view !== 'flow' && cfg.view !== 'rain') {
-          // M2：湖面直接换成「水色」而不是「陆色混蓝」——淡水湖偏青、内流咸水湖更深蓝绿。
-          // 逐顶点的 vSalt 用三个 region 是否内流的平均值近似（0/1 之间连续过渡）
-          const tgt = S.vSalt[v] > 0.5 ? saltRGB : lakeRGB;
-          const k = P.lakeBlend * (0.55 + 0.45 * S.vSalt[v]);
-          c = [lerp(c[0], tgt[0], k), lerp(c[1], tgt[1], k), lerp(c[2], tgt[2], k)];
-        } else if (cfg.view === 'biome') {
-          // 交给分类色
-        } else if (cfg.view === 'terrain') {
-          const f = clamp((S.vFlow[v] - cfg.hydro.riverThreshold * 0.6) /
-            Math.max(1e-6, S.maxFlow * 0.25), 0, 1);
-          if (f > 0) {
-            // 支流淡、干流浓：河网在陆地上是「越往下游越实」的一笔
-            const k = 0.42 + 0.45 * f;
-            c = [lerp(c[0], riverRGB[0], k), lerp(c[1], riverRGB[1], k), lerp(c[2], riverRGB[2], k)];
-          }
-        }
-      }
-      rgb[v * 3] = c[0]; rgb[v * 3 + 1] = c[1]; rgb[v * 3 + 2] = c[2];
-    }
-  }
-
-  // ② 纸纹颗粒 + 纸底色混合 + 烘焙光照
-  const paperOn = P.paperMix > 5e-4 || P.paperNoise > 5e-4;
-  const paper = paperOn ? hexToRgb01(P.paperTint) : null;
-  const pScale = P.paperScale;
-  for (let v = 0; v < vCount; v++) {
-    let r = rgb[v * 3], g = rgb[v * 3 + 1], b = rgb[v * 3 + 2];
-    if (paperOn) {
-      const px = S.positions[v * 3], py = S.positions[v * 3 + 1], pz = S.positions[v * 3 + 2];
-      const inv = pScale / (Math.hypot(px, py, pz) || 1);   // 用单位球方向采样 → 颗粒贴在球面上
-      const grain = 1 + P.paperNoise * PAPER_NOISE(px * inv, py * inv, pz * inv);
-      r *= grain; g *= grain; b *= grain;
-      r = lerp(r, paper[0], P.paperMix);
-      g = lerp(g, paper[1], P.paperMix);
-      b = lerp(b, paper[2], P.paperMix);
-    }
-    const sh = S.vShade[v];
-    col[v * 3] = r * sh; col[v * 3 + 1] = g * sh; col[v * 3 + 2] = b * sh;
-  }
-
-  if (S.colorAttr) S.colorAttr.needsUpdate = true;
-  if (S.triToRegionAttr) S.triToRegionAttr.needsUpdate = true;
-}
-
-/**
- * [Godot-ready] 纯算法 —— 海岸墨线：对 L1 每个三角形做「等值线切割」
- * （marching triangles）。
- *
- * 三顶点的「海/陆」二分类若不一致，就恰有 2 条边跨越 seaLevel，
- * 求出这两条边上的等值点，连成 1 条线段。
- * 每条跨界边被相邻 2 个三角形共享，等值点因此各出现两次 ——
- * 这正好满足 LineSegments「成对顶点」的要求，且相邻线段首尾相接 → 连续海岸线。
- * Godot: 同样生成 PRIMITIVE_LINES 的 PackedVector3Array。
- *
- * ★ 早期版本的 bug：每条跨界边只 push 一个等值点，顶点数为奇数，
- *   LineSegments 会把不相邻的等值点两两配对，画出横穿球面的长直线。
- */
-function buildCoastLine(T, cfg) {
-  const R = 1 + cfg.render.coastLift + cfg.render.inkLift;
-  const s = cfg.seaLevel;
-  const out = [];
-  const pts = [];
-  const edge = (i, j, ei, ej) => {
-    if ((ei > s) === (ej > s)) return;
-    const t = clamp((s - ei) / ((ej - ei) || 1e-9), 0, 1);
-    const p = sphereInterp(T.center[i], T.center[j], t);
-    pts.push(p[0] * R, p[1] * R, p[2] * R);
-  };
-  for (let f = 0; f < T.faces.length; f++) {
-    const fa = T.faces[f];
-    const a = fa[0], b = fa[1], c = fa[2];
-    const ea = T.elevation[a], eb = T.elevation[b], ec = T.elevation[c];
-    if ((ea > s) === (eb > s) && (eb > s) === (ec > s)) continue;   // 全陆 / 全海
-    pts.length = 0;
-    edge(a, b, ea, eb);
-    edge(b, c, eb, ec);
-    edge(c, a, ec, ea);
-    if (pts.length < 6) continue;                                   // 理论上不会发生
-    out.push(pts[0], pts[1], pts[2], pts[3], pts[4], pts[5]);
-  }
-  return Float32Array.from(out);
-}
-
-/**
- * [Godot-ready] 纯算法 —— 湖岸等值线。
- *
- * 和 `buildCoastLine` 同一套「等值线切割」结构，只是标量场换成 **`isLake` 二值场**：
- * 三角形的三个顶点若「湖/非湖」分类不一致，恰有 2 条边跨界，取这两条边的
- * **中点**连成 1 段（二值场的等值线必然落在边中点上，不需要 lerp）。
- *
- * ★ 半径取「**湖那一侧**」的 `vertexRadius`（= `filled` 高度），
- *   这样整圈湖岸都落在**同一个湖面**上，不会掉到陆地那一侧的坡面里去。
- */
-function buildLakeShoreSegments(T, cfg) {
-  const lift = cfg.render.coastLift + cfg.render.inkLift;
-  const n = T.n;
-  const rad = new Float32Array(n);
-  for (let i = 0; i < n; i++) rad[i] = vertexRadius(T, i, cfg) + lift;
-
-  // ★ 小湖不描边：单个 region 的湖岸线在六边形网格上就是一个**正六边形圈**，
-  //   视觉上像「六角螺帽」。改成只用顶点色填充（lakeColor）反而更自然。
-  //   阈值 `lakeShoreMinCells` = 该连通湖至少要几格才值得描一圈。
-  const minCells = cfg.render.lakeShoreMinCells | 0;
-  let keep = null;
-  if (minCells > 1) {
-    keep = new Uint8Array(n);
-    const seen = new Uint8Array(n);
-    const st = [], comp = [];
-    for (let r = 0; r < n; r++) {
-      if (T.isLake[r] !== 1 || seen[r]) continue;
-      st.length = 0; comp.length = 0;
-      st.push(r); seen[r] = 1;
-      while (st.length) {
-        const i = st.pop(); comp.push(i);
-        const nb = T.neighbors[i];
-        for (let k = 0; k < nb.length; k++) {
-          const j = nb[k];
-          if (T.isLake[j] === 1 && !seen[j]) { seen[j] = 1; st.push(j); }
-        }
-      }
-      if (comp.length >= minCells) for (let k = 0; k < comp.length; k++) keep[comp[k]] = 1;
-    }
-  }
-  const isL = (i) => T.isLake[i] === 1 && (keep === null || keep[i] === 1);
-
-  const out = [];
-  const pts = [];
-  for (let f = 0; f < T.faces.length; f++) {
-    const fa = T.faces[f];
-    const a = fa[0], b = fa[1], c = fa[2];
-    const la = isL(a), lb = isL(b), lc = isL(c);
-    if (la === lb && lb === lc) continue;              // 全湖 / 全非湖
-    pts.length = 0;
-    const edge = (i, j) => {
-      const li = isL(i), lj = isL(j);
-      if (li === lj) return;
-      const p = sphereInterp(T.center[i], T.center[j], 0.5);
-      const k = rad[li ? i : j];
-      pts.push(p[0] * k, p[1] * k, p[2] * k);
-    };
-    edge(a, b); edge(b, c); edge(c, a);
-    if (pts.length < 6) continue;
-    out.push(pts[0], pts[1], pts[2], pts[3], pts[4], pts[5]);
-  }
-  return Float32Array.from(out);
-}
-
-/**
- * [渲染层] 把「一段段等值线」加粗成**有宽度的带状几何**（手绘墨线）。
- *
- * 对每一段 (p0, p1)：
- *   dir   = normalize(p1 − p0)                 片段方向
- *   n0/n1 = normalize(p0 / p1)                 两端各自的球面法线（点已乘半径，方向不变）
- *   side  = normalize(dir × n)                 切平面内的横向
- *   p0/p1 各沿 ±side 偏移 halfW
- *
- * ★ 同时沿 ±dir **外扩 halfW**：相邻片段共享端点，但各自的 `dir` 不同 →
- *   算出的 `side` 有微小旋转 → 会裂缝。外扩让相邻片段在接点处**重叠**，把缝盖住。
- *   这是「逐片段独立生成」相对「先串成折线再生成」的廉价替代，视觉上分辨不出。
- *
- * 输出直接追加进 `pos/col/idx`（顶点色 `rgb` 写进每个顶点），
- * 配合 `DoubleSide` 材料，绕序随便。
- */
-function appendRibbon(pos, col, idx, segs, width, rgb) {
-  const half = width * 0.5;
-  for (let i = 0; i + 5 < segs.length; i += 6) {
-    const p0x = segs[i], p0y = segs[i + 1], p0z = segs[i + 2];
-    const p1x = segs[i + 3], p1y = segs[i + 4], p1z = segs[i + 5];
-    let dx = p1x - p0x, dy = p1y - p0y, dz = p1z - p0z;
-    const dl = Math.hypot(dx, dy, dz) || 1e-9;
-    dx /= dl; dy /= dl; dz /= dl;
-
-    const l0 = Math.hypot(p0x, p0y, p0z) || 1;
-    const l1 = Math.hypot(p1x, p1y, p1z) || 1;
-    const n0x = p0x / l0, n0y = p0y / l0, n0z = p0z / l0;
-    const n1x = p1x / l1, n1y = p1y / l1, n1z = p1z / l1;
-
-    let sx0 = dy * n0z - dz * n0y, sy0 = dz * n0x - dx * n0z, sz0 = dx * n0y - dy * n0x;
-    let sx1 = dy * n1z - dz * n1y, sy1 = dz * n1x - dx * n1z, sz1 = dx * n1y - dy * n1x;
-    const q0 = Math.hypot(sx0, sy0, sz0) || 1;
-    const q1 = Math.hypot(sx1, sy1, sz1) || 1;
-    sx0 /= q0; sy0 /= q0; sz0 /= q0;
-    sx1 /= q1; sy1 /= q1; sz1 /= q1;
-
-    const a0x = p0x - dx * half, a0y = p0y - dy * half, a0z = p0z - dz * half;
-    const a1x = p1x + dx * half, a1y = p1y + dy * half, a1z = p1z + dz * half;
-
-    const base = pos.length / 3;
-    pos.push(a0x + sx0 * half, a0y + sy0 * half, a0z + sz0 * half);
-    pos.push(a0x - sx0 * half, a0y - sy0 * half, a0z - sz0 * half);
-    pos.push(a1x + sx1 * half, a1y + sy1 * half, a1z + sz1 * half);
-    pos.push(a1x - sx1 * half, a1y - sy1 * half, a1z - sz1 * half);
-    for (let k = 0; k < 4; k++) col.push(rgb[0], rgb[1], rgb[2]);
-    idx.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+  // 标准化（z-score）后线性映射到 0~1
+  for (let i = 0; i < tiles.length; i++) {
+    const z = (raw[i] - mean) / std;
+    tiles[i].elevation = clamp01(CONFIG.elevationCenter + z * CONFIG.elevationSpread);
   }
 }
 
 /**
- * [渲染层] 墨线层：**海岸线 + 湖岸线合并成 1 个 mesh**（用顶点色区分两种墨）。
- * Godot: 一个带 COLOR 通道的 ArrayMesh，PRIMITIVE_TRIANGLES。
+ * 河流判定：用另一路噪声的「零值线」构造网状水系。
+ * |noise| 越接近 0 的地方越可能是河道；河道随海拔升高而变窄。
  */
-function buildInkGeometry(T, cfg) {
-  const R = cfg.render;
-  const coast = buildCoastLine(T, cfg);
-  const shore = buildLakeShoreSegments(T, cfg);
-  const pos = [], col = [], idx = [];
-  appendRibbon(pos, col, idx, coast, R.coastWidth, hexToRgb01(R.coastColor));
-  appendRibbon(pos, col, idx, shore, R.lakeShoreWidth, hexToRgb01(R.lakeShoreColor));
-  return {
-    positions: Float32Array.from(pos),
-    colors: Float32Array.from(col),
-    index: Uint32Array.from(idx),
-    coastSegments: coast.length / 6,
-    shoreSegments: shore.length / 6,
-  };
+function isRiver(center, elevation) {
+  if (elevation <= CONFIG.seaLevel + 0.02) return false;        // 海面附近不算河
+  if (elevation > CONFIG.riverMaxElevation) return false;       // 高山雪线以上不算河
+
+  const p = center.clone().multiplyScalar(CONFIG.riverScale);
+  const r = Math.abs(sampleNoise3D(
+    p.x + OFFSET_C.x, p.y + OFFSET_C.y, p.z + OFFSET_C.z,
+  ));
+
+  // t: 0 靠近海平面 → 1 接近高山；河道近海宽、源头窄
+  const t = (elevation - CONFIG.seaLevel) / (CONFIG.riverMaxElevation - CONFIG.seaLevel);
+  const width = CONFIG.riverWidth * (0.4 + 0.6 * (1 - t));
+  return r < width;
 }
 
 /**
- * [渲染层] 河流缎带（M2）——把 M1 的 1px 骨架线换成**变宽度三角带**。
+ * 纬向基础湿度 —— 三圈环流模型（★ 阶段 A 改为「乘性脱湿」）。
  *
- * 宽度 = `lerp(riverMinWidth, riverMaxWidth, (flow / maxFlow) ^ riverWidthBias)`，
- * 所以上游细、下游粗，干流自然比支流宽；`bias = 0.38 < 0.5` 是为了让细流也看得见。
+ * 大气环流决定了降水在地球上的带状分布，这条规律与温度无关：
+ *   赤道（|lat| ≈ 0.00）  上升气流 → 湿润   （热带雨林带）
+ *   副热带（≈ 0.40）      下沉气流 → 干旱   （撒哈拉、阿拉伯、澳洲沙漠带）
+ *   中纬（≈ 0.72）        西风带   → 湿润   （温带森林带）
+ *   极地（≈ 1.00）        下沉气流 → 干旱
  *
- * ★ 关键设计：横向向量 `side` **按 region 算一次并共享**，不是每段独立算。
- *   因为相邻河段在端点处共用同一个 region，共享 `side` 意味着两条段在该点的
- *   两个顶点位置完全一致 → **汇流/拐弯处天然无缝**。若每段独立算 `side`，
- *   接缝处会裂开一道口子。
+ * 参数 absLat 为 |sin(地理纬度)|，返回基础湿度（调用方需 clamp）。
  *
- * Godot: `SurfaceTool` 生成带状 ArrayMesh（PRIMITIVE_TRIANGLES），或 `ImmediateMesh`。
+ * ★ 为什么把「减性扣减」改成「乘性脱湿」：
+ *   旧实现 `max(wetEquator, wetMidLat) * 1.15 − drySubtropic * 0.85`，
+ *   在副热带中心（|lat| = 0.40）给出 0.253 − 0.850 = −0.597，被 clamp01 压成 0。
+ *   实测后果：副热带陆地 76.8% 的格子湿度**精确等于 0**（纬度 30–40% 档达 99.4%，
+ *   标准差仅 0.004）—— 沙漠带内没有任何梯度，也没有绿洲/半干旱的过渡，
+ *   全星球的「草原」因此只剩 1.39%。
+ *   物理上，「下沉气流」是把水汽**按比例**压干，而不是从湿度里减掉一个常数；
+ *   乘性形式保证任何位置都保留残余湿度，带与带之间连续过渡，
+ *   于是「沙漠 → 半干旱草原 → 稀树草原 → 雨林」的过渡带才有可能出现。
  */
-function buildRiverRibbon(T, cfg) {
-  const R = cfg.render;
-  const n = T.n;
-  const lift = R.riverLift;
-
-  let maxFlow = 1e-6;
-  for (let i = 0; i < n; i++) if (T.flow[i] > maxFlow) maxFlow = T.flow[i];
-
-  // ★ 河道判据（两级门槛，各管一件事）：
-  //   ① 拓扑门槛 `riverAreaThreshold`：上游汇水面积（`T.area`，格）≥ N，
-  //      才承认「这里是一条真正的河道」。这是 GIS 里的标准做法（contributing
-  //      area threshold），只依赖 downslope 拓扑，**不受湿度噪声污染**。
-  //      实测（level 5 / seed 1337，figure = 孤立划占比 / 最长链）：
-  //        旧判据 `flow > 1.0`：332 段，孤立划 30.7%，最长链 8
-  //        新判据 `area ≥ 5 & flow ≥ 0.10`：391 段，孤立划 17.9%，最长链 10
-  //      孤立划视觉上就是「梳齿/鱼骨」，所以这一步把鱼骨换成了树枝状水系。
-  //
-  //   ② 水量门槛 `riverFlowMin`：流量 < 该值视为**干河床**不画。
-  //      只靠面积会把「汇水面积很大但没水」的沙漠干谷也画成河
-  //      （实测 area≥5 时 32.7% 的河道落在干旱群系里；加 flow≥0.10 后降到 22%，
-  //      而干旱群系本身占陆地 40.9% —— 也就是河流仍明显偏好在湿润区）。
-  //
-  //   ★ 这套判据是旧判据的**严格推广**：令 area=1、flowMin=1.0 就退化成
-  //     原来的 `flow > riverThreshold × riverTribFactor`。面板里两个滑杆可实时调。
-  //
-  //   **纯渲染层行为，不改算法层的 isRiver / biome**（`isRiver` 仍只用来决定
-  //   主河道配色与河宽档位）。
-  const stemCut = cfg.hydro.riverThreshold;
-  const areaCut = R.riverAreaThreshold;      // 拓扑门槛（格）
-  const flowMin = R.riverFlowMin;            // 水量门槛
-  const bias = R.riverWidthBias;
-
-  // ① 逐 region：宽度 + 横向单位向量（垂直流向、落在切平面内）
-  //    side 必须对**所有**有下坡的 region 都算（不只是河流格），
-  //    因为河段的下游端点常常落在非河流格上（河口/低流量段）。
-  const side = new Float32Array(n * 3);
-  const wid = new Float32Array(n);
-  let channelCells = 0, dryDropped = 0;
-  for (let r = 0; r < n; r++) {
-    const d = T.downslope[r];
-    if (d < 0) continue;
-    // 湖面与海面不是河道（它们是汇，不往下游传水）
-    const isDryLand = T.elevation[r] > cfg.seaLevel && T.isLake[r] === 0;
-    if (isDryLand && T.area[r] >= areaCut) {
-      if (T.flow[r] >= flowMin) {
-        channelCells++;
-        // 河宽按**流量**取渐变（上游细、下游粗），与面积门槛解耦
-        const t = clamp(T.flow[r] / maxFlow, 0, 1);
-        wid[r] = lerp(R.riverMinWidth, R.riverMaxWidth, Math.pow(t, bias));
-      } else {
-        dryDropped++;                      // 有河道形状但没有水 → 干河床
-      }
-    }
-    const a = T.center[r], b = T.center[d];
-    let dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-    const dl = Math.hypot(dx, dy, dz) || 1e-9;
-    dx /= dl; dy /= dl; dz /= dl;
-    let sx = dy * a[2] - dz * a[1], sy = dz * a[0] - dx * a[2], sz = dx * a[1] - dy * a[0];
-    const sl = Math.hypot(sx, sy, sz) || 1;
-    side[r * 3] = sx / sl; side[r * 3 + 1] = sy / sl; side[r * 3 + 2] = sz / sl;
-  }
-
-  // ①b 每个河道格的「主上游」= 汇水面积最大的、且**已经成河**的上游邻居。
-  //     有了它才能把相邻两段河用一条**平滑曲线**接起来（见 ②）：接点取两格中心的
-  //     弦中点，于是上游格的终点与下游格的起点是同一个点、同一个横向向量。
-  const prev = new Int32Array(n).fill(-1);
-  for (let r = 0; r < n; r++) {
-    if (wid[r] <= 0) continue;
-    const nb = T.neighbors[r];
-    let best = -1, bestA = -1;
-    for (let k = 0; k < nb.length; k++) {
-      const j = nb[k];
-      if (wid[j] > 0 && T.downslope[j] === r && T.area[j] > bestA) { bestA = T.area[j]; best = j; }
-    }
-    prev[r] = best;
-  }
-
-  // ② 每个河道格输出 **K 段**平滑带（二次 Bezier 中心线 + 逐采样点横向向量）。
-  //
-  //    ★ 为什么不是「一段一个直 quad」：region 中心连成的折线在六边形网格上
-  //      必然出现 120° 硬折角，视觉上像闪电/裂缝，不像河。
-  //      做法：以本格中心 `C` 为**控制点**，从上游接点 `A`（与上游格共享的弦中点）
-  //      弯到下游接点 `B`（与下游格共享的弦中点），在 A→B 上取 K 个子段。
-  //      相邻两格在接点处的位置、横向向量、半径、宽度**全部一致**
-  //      → 整条河在接点处 C1 连续，弯道自然、汇流处无缝。
-  //
-  //    ★ 曲线的 3 个控制点都取自球面上的点，Bezier 会略切进球内，
-  //      所以每个采样点都重新**投影回球面**并按插值半径缩放。
-  const K = Math.max(1, R.riverSmooth | 0);
-  const pos = [], col = [], idx = [];
-  const stemRGB = hexToRgb01(R.riverColor);
-  const tribRGB = hexToRgb01(R.riverTribColor);
-  const vr = new Float32Array(n);
-  for (let i = 0; i < n; i++) vr[i] = vertexRadius(T, i, cfg) + lift;
-  let stems = 0, tribes = 0;
-  for (let r = 0; r < n; r++) {
-    if (wid[r] <= 0) continue;
-    const d = T.downslope[r];
-    if (d < 0) continue;
-    const p = prev[r];
-    const cr = T.center[r], cd = T.center[d];
-    // ★ A / B / C 全部取**单位方向**，采样后再乘半径。
-    //   踩过的坑：若直接用「弦中点」当位置，|mid| = cos(半格角) ≈ 0.9995 < 1，
-    //   就落到球面**以下**被球体挡住 → 每格的头 1/K 段被裁掉，视觉上是虚线。
-    let Ax, Ay, Az, rA, wA;
-    if (p >= 0) {
-      const cp = T.center[p];
-      Ax = cp[0] + cr[0]; Ay = cp[1] + cr[1]; Az = cp[2] + cr[2];
-      wA = Math.max(wid[p], wid[r]);
-      rA = (vr[p] + vr[r]) * 0.5;
-    } else {
-      Ax = cr[0]; Ay = cr[1]; Az = cr[2];
-      wA = wid[r] * 0.6;                 // 源头收细
-      rA = vr[r];
-    }
-    {
-      const nA = Math.hypot(Ax, Ay, Az) || 1e-9;
-      Ax /= nA; Ay /= nA; Az /= nA;
-    }
-    let Bx = cr[0] + cd[0], By = cr[1] + cd[1], Bz = cr[2] + cd[2];
-    {
-      const nB = Math.hypot(Bx, By, Bz) || 1e-9;
-      Bx /= nB; By /= nB; Bz /= nB;
-    }
-    const wB = Math.max(wid[r], wid[d]);
-    const rB = (vr[r] + vr[d]) * 0.5;
-    const sA3 = (p >= 0 ? p : r) * 3;      // A 处横向向量取「上游边」的 side
-    const rgb = (T.isRiver[r] === 1) ? stemRGB : tribRGB;
-    if (T.isRiver[r] === 1) stems++; else tribes++;
-
-    let px = Ax * rA, py = Ay * rA, pz = Az * rA;
-    let qx = side[sA3], qy = side[sA3 + 1], qz = side[sA3 + 2];
-    let pw = wA;
-    for (let k2 = 1; k2 <= K; k2++) {
-      const t = k2 / K, mt = 1 - t;
-      // 二次 Bezier（控制点 = 本格中心的方向），再归一化 → 采样点始终贴在球面上
-      let bx = mt * mt * Ax + 2 * mt * t * cr[0] + t * t * Bx;
-      let by = mt * mt * Ay + 2 * mt * t * cr[1] + t * t * By;
-      let bz = mt * mt * Az + 2 * mt * t * cr[2] + t * t * Bz;
-      const bl = Math.hypot(bx, by, bz) || 1e-9;
-      const rad = rA + (rB - rA) * t;
-      bx = bx / bl * rad; by = by / bl * rad; bz = bz / bl * rad;
-      // 横向向量：A 处用「上游边」的 side，B 处用「本边」的 side，中间插值后归一化
-      let sx = side[sA3] * (1 - t) + side[r * 3] * t;
-      let sy = side[sA3 + 1] * (1 - t) + side[r * 3 + 1] * t;
-      let sz = side[sA3 + 2] * (1 - t) + side[r * 3 + 2] * t;
-      const sn = Math.hypot(sx, sy, sz) || 1;
-      sx /= sn; sy /= sn; sz /= sn;
-      const ww = wA + (wB - wA) * t;
-      // ★ 近端用**上一个采样点**的半宽：子段内宽度是线性渐变的，
-      //   若近端也用本采样点的半宽，两个子段在接点处宽度不连续 → 会看到缺口。
-      const h0 = pw * 0.5, h1 = ww * 0.5;
-      const base = pos.length / 3;
-      pos.push(px + qx * h0, py + qy * h0, pz + qz * h0);
-      pos.push(px - qx * h0, py - qy * h0, pz - qz * h0);
-      pos.push(bx + sx * h1, by + sy * h1, bz + sz * h1);
-      pos.push(bx - sx * h1, by - sy * h1, bz - sz * h1);
-      for (let k3 = 0; k3 < 4; k3++) col.push(rgb[0], rgb[1], rgb[2]);
-      idx.push(base, base + 2, base + 1, base + 2, base + 3, base + 1);
-      px = bx; py = by; pz = bz; qx = sx; qy = sy; qz = sz; pw = ww;
-    }
-  }
-  return {
-    positions: Float32Array.from(pos),
-    colors: Float32Array.from(col),
-    index: Uint32Array.from(idx),
-    segments: pos.length / 12,
-    stems, tribes, channelCells, dryDropped, areaCut, flowMin, maxFlow,
-  };
-}
-
-/*__L3DONE__*/
-
-/* ═══════════════════════════════════════════════════════════════════════
-   L4 app —— 场景 / 相机 / 交互 / HUD / 参数面板
-   这一层在 Godot 中换成场景树 + Control 节点；参数面板换成 @export + Inspector。
-   ═══════════════════════════════════════════════════════════════════════ */
-
-const $ = (id) => document.getElementById(id);
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
-const debounce = (fn, ms) => { let id = 0; return () => { clearTimeout(id); id = setTimeout(fn, ms); }; };
-
-let renderer, scene, camera, controls, raycaster;
-let planetMesh, inkObj, riverObj, hoverObj;
-let INK = null, RIB = null;        // 最近一次构建的墨线 / 河流几何（供 HUD 与验证脚本读取）
-let MESH = null, DUAL = null, T = null, S = null;
-let RAIN = { iterations: 0, residual: 0 }, LAKE = { lakeCount: 0, maxDepth: 0, endoBasins: 0 }, HYD = { maxFlow: 0, riverCount: 0 };
-let busy = false, queuedFull = false;
-const TIMING = {};
-const pointer = new THREE.Vector2(-2, -2);
-let hoverRegion = -1, pickDirty = false;
-/* ── M3 交互：悬停 / 选中的 region 轮廓 ──
-   ★ 决策要求：高亮**不改几何体**，只用一个独立 `LineLoop` 描出该 region 的 dual 环轮廓，
-     并抬到 `hoverLift`（> riverLift）之上。所以 planetMesh 永远是 1 个 draw call，
-     高亮只是额外 1 个对象（共 4 个：planet / ink / river / hover）。 */
-let selectedRegion = -1;
-let outlineRegion = -1;            // 当前轮廓画的是哪个 region（-1 = 不画）
-let downX = 0, downY = 0;          // 用来区分「点击」与「拖动旋转」
-// 相机移动（自动旋转 / 拖动）时也要重拾，否则轮廓会停在旧格子上；
-// 但重拾要对 61440 个三角形做射线测试，不能每帧都做 → 限流 120 ms。
-const _lastCamPos = new THREE.Vector3();
-const _lastCamQuat = new THREE.Quaternion();
-let haveCamRef = false, lastPickT = 0;
-
-function showStatus(t) { $('status').textContent = t; }
-function showOverlay(text, sub) {
-  $('ov-text').textContent = text; $('ov-sub').textContent = sub || '';
-  $('overlay').classList.add('on');
-}
-const hideOverlay = () => $('overlay').classList.remove('on');
-
-/* ── 初始几何：L1 只跑一次（滑杆变化不会重建网格） ── */
-function initAlgorithm() {
-  const t0 = performance.now();
-  const ico = buildIcosphere();
-  const sub = subdivideIcosahedron(ico.verts, ico.faces, CONFIG.level);
-  const dual = buildDual(sub.verts, sub.faces);
-  const nb = buildNeighbors(sub.verts, sub.faces, dual);
-  MESH = { verts: sub.verts, faces: sub.faces };
-  DUAL = dual;
-  T = createTerrain(sub.verts, sub.faces, dual, nb, CONFIG);
-  TIMING['L1 网格+对偶+邻接'] = performance.now() - t0;
-  return TIMING['L1 网格+对偶+邻接'];
+function latitudinalMoisture(absLat) {
+  const wetEquator   = Math.exp(-Math.pow(absLat / 0.30, 2));
+  const wetMidLat    = Math.exp(-Math.pow((absLat - 0.72) / 0.26, 2));
+  // 干旱带的中心与宽度需要贴近真实：约 15°~35°（|lat| 0.26~0.57），
+  // 太宽会把中纬度的温带森林和草原一起吃掉。
+  const drySubtropic = Math.exp(-Math.pow((absLat - 0.40) / 0.16, 2));
+  // 湿带包络：赤道与中纬各一个峰，取较大者
+  const wet = Math.max(wetEquator, wetMidLat);
+  // 副热带下沉：乘性脱湿（保底 (1 − subtropicDrying)，永不归零）
+  return wet * (1 - drySubtropic * CONFIG.subtropicDrying);
 }
 
 /**
- * 重生成：L2 因果链 9 步 → L3 烘焙 → 重建几何。
- * 分帧执行：只在重步骤前 await 一帧，让加载提示有机会绘制，主线程不被长时间独占。
+ * 计算一个图块的气候（温度、湿度），结果写回 tile 上。
+ *
+ * 温度：以太阳辐射为基础 —— 太阳高度角随纬度下降，入射能量正比于 cos(纬度)，
+ *       而 center.y === sin(纬度)，所以 cos(纬度) = sqrt(1 - lat²)。
+ *       再按「陆地相对高度」做气温直减（海拔越高越冷）。
+ *
+ * 湿度：三圈环流的纬向基础值，叠加噪声让气候边界不规则（避免出现完美的环带）。
  */
-async function regenerate() {
-  if (busy) { queuedFull = true; return; }
-  busy = true;
-  const t0 = performance.now();
-  const solverLabel = CONFIG.climate.rainSolver === 'gaussSeidel' ? 'Gauss-Seidel' : 'Jacobi';
-  const timer = setTimeout(() => showOverlay('正在生成地形…', '因果链 L2'), 200);
+function computeClimate(tile) {
+  const lat = tile.latitude;
+  const absLat = Math.abs(lat);
 
-  const step = async (name, fn, opts) => {
-    const o = opts || {};
-    if (o.yield) { showOverlay(name, o.sub || ''); await nextFrame(); }
-    const a = performance.now();
-    fn();
-    TIMING[name] = performance.now() - a;
-  };
+  // --- 温度 ---
+  const insolation = Math.sqrt(Math.max(0, 1 - lat * lat));   // = cos(地理纬度)
+  // 陆地相对高度：海平面处为 0，最高峰为 1（这样平原不会平白无故被降温）
+  const landRelief = Math.max(0, (tile.elevation - CONFIG.seaLevel) / (1 - CONFIG.seaLevel));
+  const tempJitter = sampleNoise3D(
+    tile.center.x * CONFIG.climateScale + OFFSET_D.x,
+    tile.center.y * CONFIG.climateScale + OFFSET_D.y,
+    tile.center.z * CONFIG.climateScale + OFFSET_D.z,
+  );
+  tile.temperature = clamp01(
+    insolation - landRelief * CONFIG.lapseRate + tempJitter * CONFIG.tempNoise,
+  );
 
-  try {
-    const rng = mulberry32(CONFIG.seed);
-    let peaks = [];
-    await step('1 海拔噪声', () => assignElevation(T, CONFIG, rng), { yield: true, sub: 'FBM + 脊线变换' });
-    await step('2 山脉（Poisson+BFS）', () => {
-      peaks = placeMountainPeaks(T, CONFIG, mulberry32(CONFIG.seed ^ 0x51ed2f));
-      mountainDistanceField(T, peaks, CONFIG, rng);
-    }, { yield: true, sub: '球面 Poisson-disk + 最小堆距离场' });
-    await step('3 海拔标准化', () => applyMountainRidge(T, CONFIG));
-    await step('4 温度', () => assignTemperature(T, CONFIG));
-    await step('5 风场', () => assignWind(T, CONFIG), { sub: CONFIG.climate.windMode === 'zonal' ? '三圈环流' : '单向风（调试）' });
-    await step('6 降雨迭代', () => { RAIN = solveRainfall(T, CONFIG); },
-      { yield: true, sub: solverLabel + ' + 纬向暖启动（最慢的一步）' });
-    await step('7 priority-flood', () => priorityFlood(T, CONFIG), { yield: true, sub: '下坡方向 / 填平量' });
-    await step('8 湖泊检测', () => { LAKE = detectLakes(T, CONFIG); });
-    await step('9 流量累积', () => { HYD = accumulateFlow(T, CONFIG); });
-    await step('10 生物群系', () => classifyAllBiomes(T, CONFIG));
-    await step('11 光照烘焙', () => bakeVertexShading(T, CONFIG));
-    await step('12 渲染网格', () => rebuildGeometry(), { yield: true, sub: '合并网格 + 顶点色（1 draw call）' });
-    TIMING['总耗时'] = performance.now() - t0;
-    updateHud();
-    showStatus('生成完成 · ' + TIMING['总耗时'].toFixed(0) + ' ms');
-  } catch (err) {
-    console.error(err);
-    showStatus('生成出错：' + err.message);
-  } finally {
-    clearTimeout(timer);
-    hideOverlay();
-    busy = false;
-    if (queuedFull) { queuedFull = false; regenerate(); }
-  }
-}
-
-/* ── 只重算派生数据（不重跑因果链） ── */
-async function quickUpdate(kind) {
-  if (busy) return;
-  busy = true;
-  try {
-    if (kind === 'relief') { bakeVertexShading(T, CONFIG); rebuildGeometry(); }
-    else if (kind === 'river') { recomputeRivers(); rebuildGeometry(); }
-    else { refreshVertexColors(S, T, CONFIG); syncLineVisibility(); }
-    updateHud();
-  } finally { busy = false; }
-}
-
-/** 只按新阈值重判河流（flow 本身不变） */
-function recomputeRivers() {
-  let maxFlow = 0, riverCount = 0;
-  const thr = CONFIG.hydro.riverThreshold;
-  for (let i = 0; i < T.n; i++) {
-    if (T.flow[i] > maxFlow) maxFlow = T.flow[i];
-    const r = (T.elevation[i] > CONFIG.seaLevel) && !T.isLake[i] && T.flow[i] >= thr;
-    T.isRiver[i] = r ? 1 : 0;
-    if (r) riverCount++;
-  }
-  HYD = { maxFlow, riverCount };
-}
-
-/* ── 几何构建（THREE 侧） ── */
-/** 空几何用一个退化顶点兜底，避免 boundingSphere 出现 NaN 警告 */
-function emptyFallback(arr, n) {
-  return arr && arr.length ? arr : new Float32Array(n);
+  // --- 湿度 ---
+  // ★ 阶段 A：乘性扰动（见 CONFIG.moistureNoise 的注释）。
+  //   基础湿度来自三圈环流的纬向包络，`exp(jitter · k)` 给它加上大尺度的起伏，
+  //   让气候边界不规则 —— 但**不会**把干旱区推成精确的 0。
+  const base = latitudinalMoisture(absLat);
+  const moistJitter = sampleNoise3D(
+    tile.center.x * CONFIG.climateScale + OFFSET_E.x,
+    tile.center.y * CONFIG.climateScale + OFFSET_E.y,
+    tile.center.z * CONFIG.climateScale + OFFSET_E.z,
+  );
+  tile.moisture = clamp01(base * Math.exp(moistJitter * CONFIG.moistureNoise));
 }
 
 /**
- * 由 `{ positions, colors, index }` 建 BufferGeometry。
- * 墨线层（海岸 + 湖岸）与河流缎带都是「三角带 + 顶点色」，共用这一个入口。
- * Godot: `ArrayMesh` + `SurfaceTool`（顶点 + 索引 + COLOR）。
+ * 生物群系分类。
+ *
+ * 判定顺序即优先级：
+ *     海洋/海冰 > 高山（雪峰、山脉）> 极地冰原 > 河流 > 温度带 > 湿度带
+ *
+ * 说明：
+ * - 高山单独处理，因为雪线与纬度无关（赤道上的乞力马扎罗同样有冰川）。
+ * - 河流晚于冰原判定，因此不会在冰盖上出现河道。
+ * - 温度带负责「冰原 / 苔原 / 针叶林 / 温带 / 热带」的南北分异，
+ *   湿度带负责在温带与热带内部区分「沙漠 / 草原 / 森林」。
+ *   两者缺一不可 —— 只靠温度做不出沙漠（赤道与副热带温度相近，
+ *   差别全部来自降水）。
  */
-function makeColoredGeometry(g) {
+function classifyBiome(tile) {
+  const { elevation, latitude, river, temperature, moisture } = tile;
+  const absLat = Math.abs(latitude);
+
+  // 1. 海洋：极地海面结冰
+  if (elevation <= CONFIG.seaLevel) {
+    return absLat > CONFIG.seaIceLatitude ? BIOME.SEA_ICE : BIOME.OCEAN;
+  }
+
+  // 2. 高山：雪线以上为雪峰，其次为裸露山脉。与纬度无关
+  if (elevation > SNOW_LEVEL) return BIOME.SNOW;
+  if (elevation > MOUNTAIN_LEVEL) return BIOME.MOUNTAIN;
+
+  // 3. 极地冰盖
+  if (temperature < CONFIG.tempIce) return BIOME.ICE;
+
+  // 4. 河流：陆地上各气候带都可能出现（包括穿越沙漠的过境河）
+  if (river) return BIOME.RIVER;
+
+  // 5. 温度带：由寒到暖
+  if (temperature < CONFIG.tempTundra) return BIOME.TUNDRA;
+  if (temperature < CONFIG.tempTaiga) return BIOME.TAIGA;
+
+  // 6. 温带 / 热带：在温度带内部再按湿度划分
+  if (moisture < CONFIG.moistureDesert) return BIOME.DESERT;
+  if (moisture < CONFIG.moistureGrassland) return BIOME.GRASSLAND;
+  return temperature > CONFIG.tempTropical ? BIOME.RAINFOREST : BIOME.FOREST;
+}
+
+/* =========================================================================
+ * §5  几何与渲染
+ * ========================================================================= */
+
+/**
+ * 计算每个对偶顶点的半径（方案 B）。
+ *
+ * 对偶顶点 i 对应原网格中的三角形 faces[i]，它被 3 个多边形共享。
+ * 半径取这 3 个多边形海拔的平均值，因此：
+ *   - 每个对偶顶点只有唯一半径；
+ *   - 任意两个相邻多边形引用同一条边的两个端点时，坐标完全相同 → 不会出现缝隙。
+ */
+function computeDualRadius(faces, polygons) {
+  const radius = new Float64Array(faces.length);
+  for (let fi = 0; fi < faces.length; fi++) {
+    const [a, b, c] = faces[fi];
+    const avgElevation =
+      (polygons[a].elevation + polygons[b].elevation + polygons[c].elevation) / 3;
+    radius[fi] = 1 + displacement(avgElevation);
+  }
+  return radius;
+}
+
+/**
+ * 为一个图块构建几何体：把 n 边形展开成 n 个三角形组成的扇形。
+ *
+ * 扇心取「中心方向 × 顶点平均半径」，而不是顶点坐标的算术平均：
+ * 后者会落到球体内部（造成内凹），且在顶点半径不等时会偏离面片平面。
+ */
+function buildTileGeometry(tile) {
+  const verts = tile.vertices;
+  const n = verts.length;
+
+  let sumR = 0;
+  for (const v of verts) sumR += v.length();
+  const avgR = sumR / n;
+
+  // center 本身已是单位向量，无需再次归一化
+  const cx = tile.center.x * avgR;
+  const cy = tile.center.y * avgR;
+  const cz = tile.center.z * avgR;
+
+  const positions = new Float32Array(n * 9);
+  let o = 0;
+  for (let i = 0; i < n; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % n];
+    positions[o++] = cx; positions[o++] = cy; positions[o++] = cz;  // 扇心
+    positions[o++] = a.x; positions[o++] = a.y; positions[o++] = a.z;
+    positions[o++] = b.x; positions[o++] = b.y; positions[o++] = b.z;
+  }
+
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(emptyFallback(g.positions, 3), 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(emptyFallback(g.colors, 3), 3));
-  if (g.index && g.index.length) geo.setIndex(new THREE.BufferAttribute(g.index, 1));
-  geo.computeBoundingSphere();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeBoundingSphere();   // 供 raycast 快速剔除
   return geo;
 }
 
-function rebuildGeometry() {
-  const oldGeo = planetMesh.geometry;
-  S = buildRenderMesh(T, CONFIG);
-  S.maxFlow = HYD.maxFlow || 1;
+/* =========================================================================
+ * §6  场景搭建
+ * ========================================================================= */
 
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+
+const camera = new THREE.PerspectiveCamera(
+  50, window.innerWidth / window.innerHeight, 0.1, 200,
+);
+camera.position.set(0, 0.7, 2.9);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.6;
+controls.zoomSpeed = 0.9;
+controls.enablePan = false;
+controls.minDistance = 1.35;
+controls.maxDistance = 9;
+
+const planetGroup = new THREE.Group();
+scene.add(planetGroup);
+
+/** 简单的星空背景，纯装饰 */
+function createStarfield() {
+  const COUNT = 700;
+  const positions = new Float32Array(COUNT * 3);
+  const random = mulberry32(CONFIG.seed ^ 0x5F3759DF);
+  for (let i = 0; i < COUNT; i++) {
+    // 在半径 30~60 的球壳上均匀取点
+    const u = random() * 2 - 1;
+    const theta = random() * Math.PI * 2;
+    const r = 30 + random() * 30;
+    const s = Math.sqrt(1 - u * u);
+    positions[i * 3]     = r * s * Math.cos(theta);
+    positions[i * 3 + 1] = r * u;
+    positions[i * 3 + 2] = r * s * Math.sin(theta);
+  }
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(S.positions, 3));
-  S.colorAttr = new THREE.BufferAttribute(S.colors, 3);
-  geo.setAttribute('color', S.colorAttr);
-  geo.setIndex(new THREE.BufferAttribute(S.index, 1));
-  geo.computeBoundingSphere();
-  refreshVertexColors(S, T, CONFIG);
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({
+    color: 0x9fb6d0, size: 0.16, sizeAttenuation: true,
+    transparent: true, opacity: 0.75,
+  });
+  const stars = new THREE.Points(geo, mat);
+  stars.matrixAutoUpdate = false;
+  return stars;
+}
+scene.add(createStarfield());
 
-  planetMesh.geometry = geo;
-  if (oldGeo) oldGeo.dispose();
+/* =========================================================================
+ * §7  交互：射线拾取、高亮、HUD
+ * ========================================================================= */
 
-  const oldInk = inkObj.geometry;
-  INK = buildInkGeometry(T, CONFIG);
-  inkObj.geometry = makeColoredGeometry(INK);
-  oldInk.dispose();
+let tileMeshes = [];               // 只装图块 mesh，供 raycaster 使用
+let hoveredTile = null;
+let needsPick = false;
+let pointerInside = false;
 
-  const oldRiver = riverObj.geometry;
-  RIB = buildRiverRibbon(T, CONFIG);
-  riverObj.geometry = makeColoredGeometry(RIB);
-  oldRiver.dispose();
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+const HIGHLIGHT_COLOR = new THREE.Color(0xffffff);
+const tmpColor = new THREE.Color();
 
-  syncLineVisibility();
-  refreshOutline();          // ★ M3：地形重建后轮廓要跟着新的 vertexRadius 重画
+const hudEl = document.getElementById('hud');
+const hudBiome = document.getElementById('hud-biome');
+const hudTemp = document.getElementById('hud-temp');
+const hudMoist = document.getElementById('hud-moist');
+const hudElev = document.getElementById('hud-elev');
+const hudLat = document.getElementById('hud-lat');
+const hudLon = document.getElementById('hud-lon');
+const hudId = document.getElementById('hud-id');
+
+function updateHud(tile) {
+  // center.y 即 sin(地理纬度)；经度以 +Z 为 0°、向东为正
+  const latDeg = Math.asin(clamp(tile.center.y, -1, 1)) * 180 / Math.PI;
+  const lonDeg = Math.atan2(tile.center.x, tile.center.z) * 180 / Math.PI;
+
+  hudBiome.textContent = BIOME_LABEL[tile.biome];
+  hudTemp.textContent = tile.temperature.toFixed(3);
+  hudMoist.textContent = tile.moisture.toFixed(3);
+  hudElev.textContent = tile.elevation.toFixed(3);
+  hudLat.textContent = `${latDeg >= 0 ? 'N' : 'S'} ${Math.abs(latDeg).toFixed(1)}°`;
+  hudLon.textContent = `${lonDeg >= 0 ? 'E' : 'W'} ${Math.abs(lonDeg).toFixed(1)}°`;
+  hudId.textContent = `#${tile.index} · ${tile.vertexIndices.length} 边形`;
 }
 
-function syncLineVisibility() {
-  const v = CONFIG.view;
-  inkObj.visible = true;                        // 海岸/湖岸墨线在所有视图都保留（给数据图提供地理参照）
-  riverObj.visible = (v === 'elev' || v === 'terrain' || v === 'biome');
-}
-
-/* ── HUD ── */
-function updateHud() {
-  let land = 0, lakeCount = 0, maxDepth = 0, endo = 0, riverCount = 0, maxFlow = 0;
-  const elems = [];
-  for (let i = 0; i < T.n; i++) {
-    if (T.elevation[i] > CONFIG.seaLevel) { land++; elems.push(T.elevation[i]); }
-    if (T.isLake[i]) { lakeCount++; if (T.lakeDepth[i] > maxDepth) maxDepth = T.lakeDepth[i]; }
-    if (T.isEndorheic[i]) endo++;
-    if (T.isRiver[i]) riverCount++;
-    if (T.flow[i] > maxFlow) maxFlow = T.flow[i];
-  }
-  const p95 = percentile(elems, 0.95), p50 = percentile(elems, 0.5);
-  $('h-view').textContent = (VIEWS.find((v) => v[0] === CONFIG.view) || ['', CONFIG.view])[1];
-  $('h-seed').textContent = CONFIG.seed;
-  $('h-land').textContent = (land / T.n * 100).toFixed(1) + '%  (' + land + ' 格)';
-  $('h-lake').textContent = lakeCount + ' 格  (' + (lakeCount / Math.max(1, land) * 100).toFixed(2) + '% 陆地)';
-  $('h-lakedepth').textContent = maxDepth.toFixed(4);
-  $('h-endo').textContent = endo + ' 格 / ' + LAKE.endoBasins + ' 个流域';
-  $('h-river').textContent = riverCount + ' 格  (' + (riverCount / Math.max(1, land) * 100).toFixed(2) + '% 陆地)';
-  $('h-maxflow').textContent = maxFlow.toFixed(3) + '  · 阈值 ' + CONFIG.hydro.riverThreshold.toFixed(2);
-  $('h-iter').textContent = RAIN.iterations + ' 次';
-  $('h-resid').textContent = RAIN.residual.toExponential(2);
-  $('h-solver').textContent = (CONFIG.climate.rainSolver === 'gaussSeidel' ? 'Gauss-Seidel' : 'Jacobi')
-    + ' · ' + (CONFIG.climate.windMode === 'zonal' ? '纬向风带' : '单向风');
-  $('h-total').textContent = (TIMING['总耗时'] || 0).toFixed(0) + ' ms';
-  $('h-frame').textContent = TIMING._maxFrame ? TIMING._maxFrame.toFixed(0) + ' ms' : '—';
-  $('h-tile').dataset.summary = 'p50 ' + p50.toFixed(3) + ' / p95 ' + p95.toFixed(3);
-  renderTileInfo();
-}
-
-function renderTileInfo() {
-  const el = $('h-tile');
-  const i = hoverRegion >= 0 ? hoverRegion : selectedRegion;
-  if (i < 0 || !T) {
-    el.innerHTML = '<div class="row"><span>悬停格</span><span>—（移动鼠标 / 点击选中）</span></div>';
+function updateHover() {
+  if (!pointerInside) {
+    applyHover(null);
     return;
   }
-  let tag = '';
-  if (hoverRegion === i) tag += '悬停';
-  if (selectedRegion === i) tag += (tag ? ' / ' : '') + '已选中';
-  const d = T.downslope[i];
-  const rows = [
-    ['格 / 群系', '#' + i + ' · ' + BIOME_NAME[T.biome[i]]],
-    ['海拔 / 温度', T.elevation[i].toFixed(3) + ' / ' + T.temperature[i].toFixed(3)],
-    ['降雨 / 湿度', T.rainfall[i].toFixed(3) + ' / ' + T.moisture[i].toFixed(3)],
-    ['流量 / 汇水面积', T.flow[i].toFixed(3) + ' / ' + T.area[i] + ' 格' + (T.isRiver[i] ? '  ← 河' : '')],
-    ['湖深 / 内流', (T.lakeDepth[i] > 0 ? T.lakeDepth[i].toFixed(4) : '—') + ' / ' + (T.isEndorheic[i] ? '是' : '否')],
-    ['大陆掩码 / 山脉', T.continent[i].toFixed(3) + ' / ' + T.mountain[i].toFixed(3)],
-    ['下游格', d >= 0 ? '#' + d : '—（海洋 / 边界）'],
-  ];
-  el.innerHTML =
-    '<div class="row"><span>拾取</span><span class="tag">' + (tag || '—') + '</span></div>' +
-    rows.map(([k, v]) => '<div class="row"><span>' + k + '</span><span>' + v + '</span></div>').join('');
+  // OrbitControls 只改了相机的位置与朝向，matrixWorld 要到 render 时才刷新。
+  // 这里主动更新一次，保证拾取结果与当前画面同步（否则快速旋转时会有 1 帧延迟）。
+  camera.updateMatrixWorld();
+  raycaster.setFromCamera(pointerNDC, camera);
+  // 只对图块 mesh 做拾取：planetGroup 里将来可能混入描边、光晕等对象，会被误命中
+  const hits = raycaster.intersectObjects(tileMeshes, false);
+  applyHover(hits.length > 0 ? hits[0].object.userData.tile : null);
 }
 
-/* ── M3：导出 JSON（参数 + 统计 + 分位），供 Godot 端做数值对照 ── */
-/**
- * [Godot-ready] 纯数据汇总：不含任何 THREE 对象，可直接 JSON 序列化。
- * Godot 端跑同一份 CONFIG，就可以用这里的数值做逐项断言（对标 `m1-test.mjs`）。
- */
-function buildExport() {
-  const elevs = [], temps = [], moists = [], rains = [];
-  const biomeCounts = {};
-  let land = 0, lake = 0, endo = 0, river = 0, maxFlow = 0, maxArea = 0, maxDepth = 0;
-  for (let i = 0; i < T.n; i++) {
-    if (T.elevation[i] > CONFIG.seaLevel) {
-      land++; elevs.push(T.elevation[i]); temps.push(T.temperature[i]);
-      moists.push(T.moisture[i]); rains.push(T.rainfall[i]);
-    }
-    if (T.isLake[i]) { lake++; if (T.lakeDepth[i] > maxDepth) maxDepth = T.lakeDepth[i]; }
-    if (T.isEndorheic[i]) endo++;
-    if (T.isRiver[i]) river++;
-    if (T.flow[i] > maxFlow) maxFlow = T.flow[i];
-    if (T.area[i] > maxArea) maxArea = T.area[i];
-    const nm = BIOME_NAME[T.biome[i]];
-    biomeCounts[nm] = (biomeCounts[nm] || 0) + 1;
+function applyHover(tile) {
+  if (tile === hoveredTile) return;
+
+  // 复原上一个图块
+  if (hoveredTile) {
+    hoveredTile.mesh.material.color.copy(hoveredTile.baseColor);
   }
-  const q = (arr, p) => Number(percentile(arr, p).toFixed(4));
-  const timingMs = {};
-  for (const k of Object.keys(TIMING)) if (k[0] !== '_') timingMs[k] = Number(TIMING[k].toFixed(2));
-  return {
-    meta: {
-      version: 'v3.0 (M3)', generatedAt: new Date().toISOString(),
-      level: CONFIG.level, regions: T.n, triangles: T.nT,
-      renderVertices: S ? S.vCount : 0,
-    },
-    config: JSON.parse(JSON.stringify(CONFIG)),
-    stats: {
-      land, landRatio: Number((land / T.n).toFixed(4)),
-      lake, endorheic: endo, endoBasins: LAKE.endoBasins,
-      riverCells: river, riverRibbonQuads: RIB ? RIB.segments : 0,
-      riverChannelCells: RIB ? RIB.channelCells : 0,
-      coastSegments: INK ? INK.coastSegments : 0,
-      lakeShoreSegments: INK ? INK.shoreSegments : 0,
-      maxFlow: Number(maxFlow.toFixed(4)), maxArea,
-      maxLakeDepth: Number(maxDepth.toFixed(5)),
-      rainIterations: RAIN.iterations, rainResidual: RAIN.residual,
-    },
-    biomeCounts,
-    /** 陆地标量的 p15 / p50 / p85（Godot 端重标 biome 阈值时用） */
-    quantiles: {
-      elevation: [q(elevs, 0.15), q(elevs, 0.5), q(elevs, 0.85)],
-      temperature: [q(temps, 0.15), q(temps, 0.5), q(temps, 0.85)],
-      moisture: [q(moists, 0.15), q(moists, 0.5), q(moists, 0.85)],
-      rainfall: [q(rains, 0.15), q(rains, 0.5), q(rains, 0.85)],
-    },
-    timingMs,
-  };
-}
 
-function exportJson() {
-  if (!T) return null;
-  const data = buildExport();
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'planet-' + CONFIG.seed + '-lv' + CONFIG.level + '.json';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-  showStatus('已导出 JSON · ' + a.download);
-  return data;
-}
-/* ── 调试视图（用户要求 ≥ 4 种：海拔 / 温度 / 降雨 / 流量 / 生物群系） ── */
-const VIEWS = [
-  ['elev', '海拔'], ['temp', '温度'], ['rain', '降雨'],
-  ['flow', '流量'], ['biome', '生物群系'], ['terrain', '地形色 paletteAt'],
-];
+  hoveredTile = tile;
 
-function setView(mode) {
-  CONFIG.view = mode;
-  for (const b of $('views').children) b.classList.toggle('on', b.dataset.view === mode);
-  if (S) { refreshVertexColors(S, T, CONFIG); syncLineVisibility(); }
-  if (T) updateHud();
-}
-
-function buildViewButtons() {
-  const box = $('views');
-  for (const [id, label] of VIEWS) {
-    const b = document.createElement('button');
-    b.textContent = label; b.dataset.view = id;
-    b.onclick = () => setView(id);
-    box.appendChild(b);
+  if (tile) {
+    tmpColor.copy(tile.baseColor).lerp(HIGHLIGHT_COLOR, 0.38);
+    tile.mesh.material.color.copy(tmpColor);
+    updateHud(tile);
+    hudEl.classList.add('visible');
+  } else {
+    hudEl.classList.remove('visible');
   }
 }
 
-/* ── 参数面板：原生 <input type="range">，不引入 lil-gui ── */
-function addNumber(label, get, set) {
-  const d = document.createElement('div'); d.className = 'ctl';
-  d.innerHTML = '<label>' + label + '</label>';
-  const inp = document.createElement('input');
-  inp.type = 'number'; inp.value = get();
-  inp.onchange = () => { set(parseInt(inp.value, 10) || 0); regenerate(); };
-  d.appendChild(inp); $('ctls').appendChild(d);
-}
-function addSelect(label, options, get, set) {
-  const d = document.createElement('div'); d.className = 'ctl';
-  d.innerHTML = '<label>' + label + '</label>';
-  const sel = document.createElement('select');
-  for (const [v, t] of options) {
-    const o = document.createElement('option'); o.value = v; o.textContent = t;
-    if (v === get()) o.selected = true;
-    sel.appendChild(o);
-  }
-  sel.onchange = () => { set(sel.value); regenerate(); };
-  d.appendChild(sel); $('ctls').appendChild(d);
-}
-/**
- * apply: 'full' 重跑因果链 | 'river' 只重判河流 | 'relief' 只重算几何+光照 | 'color' 只重算顶点色
- */
-function addSlider(label, min, max, stepv, get, set, apply, fmt) {
-  const d = document.createElement('div'); d.className = 'ctl';
-  const f = fmt || ((v) => (stepv < 0.01 ? v.toFixed(3) : v.toFixed(2)));
-  d.innerHTML = '<label><span>' + label + '</span><b>' + f(get()) + '</b></label>';
-  const inp = document.createElement('input');
-  inp.type = 'range'; inp.min = min; inp.max = max; inp.step = stepv; inp.value = get();
-  const lab = d.querySelector('b');
-  const commit = () => {
-    if (apply === 'full') regenerate();
-    else quickUpdate(apply);
-  };
-  const onInput = apply === 'full' ? debounce(commit, 220) : debounce(commit, apply === 'color' ? 0 : 90);
-  inp.oninput = () => { set(parseFloat(inp.value)); lab.textContent = f(parseFloat(inp.value)); onInput(); };
-  d.appendChild(inp); $('ctls').appendChild(d);
-}
+function setupInteraction() {
+  const dom = renderer.domElement;
 
-function addButton(label, fn) {
-  const d = document.createElement('div'); d.className = 'ctl';
-  const b = document.createElement('button');
-  b.type = 'button'; b.className = 'btn'; b.textContent = label;
-  b.onclick = fn;
-  d.appendChild(b); $('ctls').appendChild(d);
-}
-
-function buildPanel() {
-  const C = CONFIG;
-  addNumber('seed', () => C.seed, (v) => { C.seed = v; });
-  addSlider('seaLevel（开掩码后=陆地占比主旋钮）', -0.10, 0.45, 0.01, () => C.seaLevel, (v) => { C.seaLevel = v; }, 'full');
-  addSlider('continentalEnvelope（0=关闭）', 0, 1, 0.05, () => C.terrain.continentAmp, (v) => { C.terrain.continentAmp = v; }, 'full');
-  addSlider('continentScale（越小→大陆越大）', 0.4, 2.0, 0.05, () => C.terrain.continentScale, (v) => { C.terrain.continentScale = v; }, 'full');
-  addSlider('continentBias（越大→海洋越多）', -1.3, 0.2, 0.02, () => C.terrain.continentBias, (v) => { C.terrain.continentBias = v; }, 'full');
-  addSlider('continentBand（过渡带宽度）', 0.05, 0.45, 0.01, () => C.terrain.continentBand, (v) => { C.terrain.continentBand = v; }, 'full');
-  addSlider('oceanDepth（大洋压低量）', 0, 1.6, 0.05, () => C.terrain.oceanDepth, (v) => { C.terrain.oceanDepth = v; }, 'full');
-  addSlider('lakeMinDepth（小湖滤除）', 0.005, 0.12, 0.005, () => C.hydro.lakeMinDepth, (v) => { C.hydro.lakeMinDepth = v; }, 'full');
-  addSlider('mountainSharpness', 6, 14, 0.1, () => C.terrain.mountainSharpness, (v) => { C.terrain.mountainSharpness = v; }, 'full');
-  addSlider('raininess', 0, 2, 0.05, () => C.climate.raininess, (v) => { C.climate.raininess = v; }, 'full');
-  addSlider('riverThreshold', 0.2, 6, 0.1, () => C.hydro.riverThreshold, (v) => { C.hydro.riverThreshold = v; }, 'river');
-  addSlider('reliefScale（>0 会遮墨线）', 0, 0.06, 0.002, () => C.render.reliefScale, (v) => { C.render.reliefScale = v; }, 'relief');
-  addSlider('subtropicalStrength', 0, 0.8, 0.02, () => C.climate.subtropicalStrength, (v) => { C.climate.subtropicalStrength = v; }, 'full');
-  addSlider('saturationFloor（冷海湿度）', 0, 0.6, 0.01, () => C.climate.saturationFloor, (v) => { C.climate.saturationFloor = v; }, 'full');
-  addSlider('rainShadow', 0, 1, 0.02, () => C.climate.rainShadow, (v) => { C.climate.rainShadow = v; }, 'full');
-  addSlider('lapseRate', 0, 1.2, 0.02, () => C.terrain.lapseRate, (v) => { C.terrain.lapseRate = v; }, 'full');
-  addSelect('windMode', [['zonal', '纬向风带（三圈环流）'], ['uniform', '单向风（调试）']],
-    () => C.climate.windMode, (v) => { C.climate.windMode = v; });
-  addSelect('rainSolver', [['gaussSeidel', 'Gauss-Seidel（默认）'], ['jacobi', 'Jacobi（调试）']],
-    () => C.climate.rainSolver, (v) => { C.climate.rainSolver = v; });
-  // M2 手绘：这三项只影响逐顶点上色，不重跑因果链（'color' 档 = 即时）
-  addSlider('paperMix', 0, 0.25, 0.005, () => C.render.paperMix, (v) => { C.render.paperMix = v; }, 'color');
-  addSlider('paperNoise', 0, 0.20, 0.005, () => C.render.paperNoise, (v) => { C.render.paperNoise = v; }, 'color');
-  addSlider('riverWidth', 0.4, 2.5, 0.05, () => C.render.riverMaxWidth / 0.015,
-    (v) => { C.render.riverMaxWidth = 0.015 * v; C.render.riverMinWidth = 0.0018 * v; }, 'river');
-  // ★ 河网密度：拓扑门槛（上游汇水面积，格）与水量门槛（流量）
-  addSlider('riverArea（汇水面积门槛）', 1, 30, 1, () => C.render.riverAreaThreshold,
-    (v) => { C.render.riverAreaThreshold = v; }, 'river');
-  addSlider('riverFlowMin（干河床门槛）', 0, 1.5, 0.05, () => C.render.riverFlowMin,
-    (v) => { C.render.riverFlowMin = v; }, 'river');
-  // M3：导出 JSON（CONFIG 全量 + 统计 + 群系分布 + 陆地标量分位）—— 供 Godot 端对照验证
-  addButton('导出 JSON（参数 + 统计）', exportJson);
-}
-
-/* ── 场景 ── */
-function buildScene() {
-  const canvas = $('scene');
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
-  // 调色板是「显示取值」，直接原样输出，不做 sRGB 转换
-  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b0f14);
-
-  camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 100);
-  camera.position.set(1.9, 1.25, 2.3);
-
-  controls = new OrbitControls(camera, canvas);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.rotateSpeed = 0.55;
-  controls.minDistance = 1.35;
-  controls.maxDistance = 9;
-  controls.autoRotate = true;
-  controls.autoRotateSpeed = 0.35;
-
-  planetMesh = new THREE.Mesh(new THREE.BufferGeometry(),
-    new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.FrontSide }));
-  planetMesh.frustumCulled = false;
-  planetMesh.name = 'planet';                       // 调试/截图用（Godot: 一个 SphereMesh 的替代物）
-  scene.add(planetMesh);
-
-  // 墨线层：海岸线 + 湖岸线合并（顶点色区分）——1 个 draw call，有真实宽度
-  // ★ forceSinglePass：墨线是贴在球面上的薄片、双面 + 透明，three.js 默认会为了
-  //   正确的混合顺序把「双面透明」材质渲染两趟（Front/Back 各一遍）→ 白白翻倍 draw call。
-  //   墨线不需要背面单独混合，强制单趟即可（draw call 5 → 3）。
-  inkObj = new THREE.Mesh(new THREE.BufferGeometry(),
-    new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: CONFIG.render.coastOpacity,
-      side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true,
-    }));
-  inkObj.frustumCulled = false;
-  inkObj.name = 'ink';
-  scene.add(inkObj);
-
-  // 河流缎带：变宽度三角带（上游细、下游粗），1 个 draw call
-  riverObj = new THREE.Mesh(new THREE.BufferGeometry(),
-    new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: CONFIG.render.riverOpacity,
-      side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true,
-    }));
-  riverObj.frustumCulled = false;
-  riverObj.name = 'river';
-  scene.add(riverObj);
-
-  // M3 悬停 / 选中轮廓：一个 LineLoop（最多 6 个顶点 = 双环 5/6 边形），抬到 hoverLift 之上。
-  // ★ 刻意不用「改 planetMesh 顶点色」的方式做高亮：那样会污染 paletteAt 的烘焙结果，
-  //   而且每次 hover 都要重传 30722 个顶点。独立对象 = 只动 6 个浮点数。
-  hoverObj = new THREE.LineLoop(new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: new THREE.Color(CONFIG.render.hoverColor), transparent: true, opacity: 0.95 }));
-  hoverObj.frustumCulled = false;
-  hoverObj.name = 'hover';
-  hoverObj.visible = false;
-  scene.add(hoverObj);
-
-  raycaster = new THREE.Raycaster();
-  canvas.addEventListener('pointermove', (e) => {
-    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
-    pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
-    pickDirty = true;
+  dom.addEventListener('pointermove', (ev) => {
+    const rect = dom.getBoundingClientRect();
+    pointerNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerInside = true;
+    needsPick = true;      // 真正的拾取合并到动画循环中执行
   });
-  canvas.addEventListener('pointerleave', () => {
-    pointer.set(-2, -2); hoverRegion = -1; pickDirty = false;
-    refreshOutline(); renderTileInfo();          // 离开时轮廓落回「已选中」的那个格子
+
+  dom.addEventListener('pointerleave', () => {
+    pointerInside = false;
+    needsPick = true;
   });
-  canvas.addEventListener('pointerdown', (e) => {
-    controls.autoRotate = false; downX = e.clientX; downY = e.clientY;
-  });
-  // 点击 = 选中：位移 < 5px 才算点击（否则是拖动旋转视角）
-  canvas.addEventListener('pointerup', (e) => {
-    if (Math.abs(e.clientX - downX) > 5 || Math.abs(e.clientY - downY) > 5) return;
-    pickDirty = true; doPick();
-    setSelected(hoverRegion);
-  });
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') controls.autoRotate = !controls.autoRotate;
-    if (e.code === 'Escape') setSelected(-1);            // Esc 取消选中
-  });
-  window.addEventListener('resize', onResize);
 }
 
-/* ── M3：region 轮廓（悬停 / 选中） ── */
-/**
- * [渲染层] 把一个 region 的 dual 环轮廓画成 LineLoop。
- * 环顶点 = 该 region 周围一圈三角形的重心（`T.triCenters[regionTris[r]]`，已是单位向量）。
- * 半径取该 region 的 `vertexRadius` 再 + `hoverLift` → 永远浮在墨线 / 河流之上。
- * ★ Godot 对应：一个 `ImmediateMesh`（PRIMITIVE_LINE_LOOP）或 6 个顶点的 `ArrayMesh` + LINE_LOOP。
- */
-function drawOutline(r) {
-  if (!hoverObj || !T || r < 0 || r >= T.n) {
-    if (hoverObj) hoverObj.visible = false;
-    outlineRegion = -1;
-    return;
-  }
-  const ring = T.regionTris[r];
-  const m = ring.length;
-  const k = vertexRadius(T, r, CONFIG) + CONFIG.render.hoverLift;
-  let attr = hoverObj.geometry.getAttribute('position');
-  if (!attr || attr.array.length < 18) {                 // 6 顶点 × 3 = 18（度数最多 6）
-    attr = new THREE.BufferAttribute(new Float32Array(18), 3);
-    attr.setUsage(THREE.DynamicDrawUsage);
-    hoverObj.geometry.setAttribute('position', attr);
-  }
-  const a = attr.array;
-  for (let i = 0; i < m; i++) {
-    const c = T.triCenters[ring[i]];
-    a[i * 3] = c[0] * k; a[i * 3 + 1] = c[1] * k; a[i * 3 + 2] = c[2] * k;
-  }
-  attr.needsUpdate = true;
-  hoverObj.geometry.setDrawRange(0, m);
-  hoverObj.geometry.computeBoundingSphere();
-  hoverObj.visible = true;
-  hoverObj.material.color.set(hoverRegion === r ? CONFIG.render.hoverColor : CONFIG.render.selectColor);
-  outlineRegion = r;
-}
+/* =========================================================================
+ * §8  动画循环与窗口自适应
+ * ========================================================================= */
 
-/** 悬停优先：鼠标在球上时描悬停格，移开后落回「已选中」的那一格 */
-function refreshOutline() { drawOutline(hoverRegion >= 0 ? hoverRegion : selectedRegion); }
+const clock = new THREE.Clock();
 
-function setSelected(r) {
-  selectedRegion = r;
-  refreshOutline();
-  renderTileInfo();
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = clock.getDelta();
+  if (CONFIG.enableRotation) {
+    planetGroup.rotation.y += CONFIG.rotationSpeed * dt;
+  }
+
+  controls.update();
+
+  if (needsPick) {
+    updateHover();
+    needsPick = false;
+  }
+
+  renderer.render(scene, camera);
 }
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener('resize', onResize);
+
+/* =========================================================================
+ * §9  图例
+ * ========================================================================= */
+function buildLegend() {
+  const el = document.getElementById('legend');
+  // 按气候带由冷到热排列，便于对照
+  const order = [
+    BIOME.OCEAN, BIOME.SEA_ICE, BIOME.RIVER,
+    BIOME.ICE, BIOME.TUNDRA, BIOME.TAIGA,
+    BIOME.FOREST, BIOME.RAINFOREST, BIOME.GRASSLAND,
+    BIOME.DESERT, BIOME.MOUNTAIN, BIOME.SNOW,
+  ];
+  el.innerHTML = order.map((b) => {
+    const hex = '#' + BIOME_COLOR[b].toString(16).padStart(6, '0');
+    return `<div class="item"><span class="swatch" style="background:${hex}"></span>${BIOME_LABEL[b]}</div>`;
+  }).join('');
 }
 
-function doPick() {
-  if (!S) return;
-  // 相机移动（自动旋转 / 拖动）时也要重拾，否则轮廓会停在旧格子上。
-  // ★ 一次拾取要对 61440 个三角形做射线测试，不能每帧都做 → 相机移动时限流 120 ms；
-  //   鼠标移动（pickDirty）走即时通道，零等待。
-  const now = performance.now();
-  if (!pickDirty) {
-    const camMoved = !haveCamRef
-      || camera.position.distanceToSquared(_lastCamPos) > 1e-8
-      || camera.quaternion.angleTo(_lastCamQuat) > 1e-4;
-    if (!camMoved || now - lastPickT < 120) return;
+/* =========================================================================
+ * §10  自测：验证网格与地形数据是否符合预期
+ * ========================================================================= */
+function runSelfTest(tiles) {
+  const rows = [];
+  const check = (name, ok, detail) => rows.push({ name, ok: !!ok, detail: detail ?? '' });
+
+  const expectedFaces = 10 * 4 ** CONFIG.level + 2;
+  check('图块总数', tiles.length === expectedFaces, `${tiles.length} / 期望 ${expectedFaces}`);
+
+  const pentagons = tiles.filter((t) => t.vertexIndices.length === 5).length;
+  const hexagons = tiles.filter((t) => t.vertexIndices.length === 6).length;
+  check('五边形数量 = 12', pentagons === 12, `${pentagons}`);
+  check('其余均为六边形', pentagons + hexagons === tiles.length, `六边形 ${hexagons}`);
+
+  check('elevation ∈ [0,1]', tiles.every((t) => t.elevation >= 0 && t.elevation <= 1));
+  check('center 为单位向量', tiles.every((t) => Math.abs(t.center.length() - 1) < 1e-9));
+  check('无 NaN', tiles.every((t) =>
+    Number.isFinite(t.center.x + t.center.y + t.center.z) && Number.isFinite(t.elevation)));
+
+  // 无缝隙：同一个对偶顶点索引，在任何图块中都必须指向同一个 Vector3 实例
+  let sharedRefs = true;
+  const owner = new Map();
+  for (const t of tiles) {
+    for (let i = 0; i < t.vertexIndices.length; i++) {
+      const key = t.vertexIndices[i];
+      if (owner.has(key)) {
+        if (owner.get(key) !== t.vertices[i]) sharedRefs = false;
+      } else {
+        owner.set(key, t.vertices[i]);
+      }
+    }
   }
-  pickDirty = false;
-  lastPickT = now;
-  _lastCamPos.copy(camera.position); _lastCamQuat.copy(camera.quaternion); haveCamRef = true;
-  if (pointer.x < -1.5) return;
-  raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObject(planetMesh, false);
-  let r = -1;
-  if (hits.length > 0 && hits[0].faceIndex !== undefined) {
-    // ★ faceIndex → region 用 O(1) 查表：region 的三角形不连续（每半边各出一个三角形）
-    r = S.triToRegion[hits[0].faceIndex];
+  check('共享顶点为同一引用（无缝隙）', sharedRefs);
+
+  // 生物群系统计
+  const stats = {};
+  for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
+  const statText = Object.keys(BIOME_LABEL)
+    .map((b) => `${BIOME_LABEL[b]} ${stats[b] || 0}`)
+    .join(' · ');
+
+  console.groupCollapsed(
+    `%c[自测] Goldberg 球体 · level=${CONFIG.level} · ${tiles.length} 个图块`,
+    'color:#6cf;font-weight:bold',
+  );
+  console.table(rows.map((r) => ({
+    检查项: r.name, 结果: r.ok ? '✅ 通过' : '❌ 失败', 详情: r.detail,
+  })));
+  console.log('生物群系分布：' + statText);
+  console.log(`海洋占比：${(((stats[BIOME.OCEAN] || 0) / tiles.length) * 100).toFixed(1)}%`);
+  console.groupEnd();
+
+  const failed = rows.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    console.error('自测未通过：', failed.map((r) => r.name).join('、'));
   }
-  if (r !== hoverRegion) { hoverRegion = r; refreshOutline(); renderTileInfo(); }
+  return { rows, stats };
 }
 
-/* ── 主循环 ── */
-let lastT = 0;
-function animate(now) {
-  requestAnimationFrame(animate);
-  const dt = now - lastT; lastT = now;
-  if (dt > 0 && dt < 400) TIMING._maxFrame = Math.max(TIMING._maxFrame || 0, dt);
-  controls.update();
-  doPick();
-  renderer.render(scene, camera);
+/* =========================================================================
+ * §11  启动
+ * ========================================================================= */
+function init() {
+  // --- 1. 生成球体网格（对偶图）---
+  const ico  = buildIcosahedron();                                    // 12 个已归一化顶点 / 20 面
+  const mesh = subdivide(ico.vertices, ico.faces, CONFIG.level);      // 细分并投影到单位球面
+  const dual = buildDual(mesh.vertices, mesh.faces);                  // { dualPos, polygons }
+
+  const tiles = dual.polygons;
+  tiles.forEach((tile, i) => { tile.index = i; });
+
+  // --- 2. 生成地形数据 ---
+  computeElevations(tiles);                       // 批量计算并标准化海拔
+  for (const tile of tiles) {
+    tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
+    tile.river    = isRiver(tile.center, tile.elevation);
+    computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
+    tile.biome    = classifyBiome(tile);
+  }
+
+  // --- 3. 计算渲染坐标 ---
+  // 关闭高度偏移时，直接复用归一化后的对偶顶点：
+  // 所有图块共享同一批 Vector3 实例，球面严格为半径 1 的光滑球面，
+  // 相邻图块共享边的坐标完全一致 —— 既无缝隙，也无高低疙瘩。
+  let renderPos;
+  if (CONFIG.enableHeightOffset) {
+    const dualRadius = computeDualRadius(mesh.faces, tiles);   // 方案 B：共享半径
+    renderPos = dual.dualPos.map((p, i) => p.clone().multiplyScalar(dualRadius[i]));
+  } else {
+    renderPos = dual.dualPos;
+  }
+
+  // --- 4. 构建图块 ---
+  planetGroup.clear();
+  tileMeshes = [];
+
+  for (const tile of tiles) {
+    // 4.1 拓扑索引 → 渲染坐标。多个图块会共享同一批 Vector3 实例，故共享边坐标完全一致
+    tile.vertices = tile.vertexIndices.map((i) => renderPos[i]);
+
+    let sumR = 0;
+    for (const v of tile.vertices) sumR += v.length();
+    tile.avgRadius = sumR / tile.vertices.length;
+
+    // 4.2 几何体 + 独立材质。
+    //     必须为每个图块 new 一个材质，禁止按 biome 缓存共享，
+    //     否则悬停高亮会污染所有同色图块。
+    const geometry = buildTileGeometry(tile);
+    const material = new THREE.MeshBasicMaterial({
+      color: BIOME_COLOR[tile.biome],
+      side: THREE.DoubleSide,   // 防御性措施：环序实际已自洽
+    });
+
+    const tileMesh = new THREE.Mesh(geometry, material);
+    tileMesh.userData.tile = tile;
+
+    // 图块的位置完全由几何体的顶点坐标决定，mesh 自身永不移动。
+    // 关掉矩阵自动更新，可省去每帧 N 次（level=4 时 2562 次）无意义的本地矩阵重算。
+    // 注意：若将来需要单独移动某个图块，必须把 matrixAutoUpdate 改回 true。
+    tileMesh.matrixAutoUpdate = false;
+    tileMesh.updateMatrix();
+
+    tile.mesh = tileMesh;
+    tile.baseColor = new THREE.Color(BIOME_COLOR[tile.biome]);   // 悬停复原用，必须在此初始化
+
+    tileMeshes.push(tileMesh);
+    planetGroup.add(tileMesh);
+  }
+
+  // --- 5. 交互与循环 ---
+  setupInteraction();
+  buildLegend();
+
+  if (CONFIG.debugAssert) runSelfTest(tiles);
+
+  animate();
+
+  const loadingEl = document.getElementById('loading');
+  if (loadingEl) loadingEl.remove();
+  window.__planetReady = true;
+
+  console.log(
+    `%c星球生成完毕：level=${CONFIG.level}，图块 ${tiles.length} 个，` +
+    `其中五边形 ${tiles.filter((t) => t.vertexIndices.length === 5).length} 个。`,
+    'color:#6cf',
+  );
+  console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
+
+  // --- 6. 调参用出口 ---
+  // 河流 / 气候 / 分类都是纯函数（只依赖 CONFIG 与图块数据），所以改完 CONFIG 直接调
+  // __PLANET__.refresh() 就能看到新结果，不必重建网格、也不必重载页面。
+  // 调参时每次重载页面要 ~1 分钟（level 5 + 10242 个 Mesh），这个出口能省掉绝大部分等待。
+  // 对正常浏览无任何影响，只是把内部函数挂到 window 上。
+  window.__PLANET__ = {
+    CONFIG, BIOME, BIOME_COLOR, BIOME_LABEL, tiles,
+    computeClimate, classifyBiome, latitudinalMoisture, isRiver,
+    /** 重跑「河流 → 气候 → 群系 → 颜色」，返回新的群系计数 */
+    refresh() {
+      const stats = {};
+      for (const tile of tiles) {
+        tile.river = isRiver(tile.center, tile.elevation);
+        computeClimate(tile);
+        tile.biome = classifyBiome(tile);
+        const hex = BIOME_COLOR[tile.biome];
+        tile.baseColor.setHex(hex);
+        tile.mesh.material.color.setHex(hex);
+        stats[tile.biome] = (stats[tile.biome] || 0) + 1;
+      }
+      return stats;
+    },
+  };
 }
 
-/* ── 启动 ── */
-async function main() {
+// 延后一帧执行，让 loading 文案有机会被绘制出来
+requestAnimationFrame(() => {
   try {
-    showOverlay('初始化…', '构建 icosphere 与对偶结构（L1）');
-    buildScene();
-    buildViewButtons();
-    buildPanel();
-    await nextFrame();
-    const t1 = initAlgorithm();
-    console.log('[M1] L1 网格 + 对偶 + 邻接：' + t1.toFixed(1) + ' ms，region=' + T.n + '，三角=' + T.nT
-      + '，渲染顶点=' + (T.n + T.nT) + '，draw call = 1（+ 墨线 / 河流 / 悬停轮廓 = 4 个对象）');
-    document.documentElement.dataset.level = String(CONFIG.level);
-    await regenerate();
-    setView(CONFIG.view);
-    requestAnimationFrame(animate);
+    init();
   } catch (err) {
     console.error(err);
-    $('err').classList.add('on');
-    $('err-detail').textContent = String(err && err.message || err);
-    hideOverlay();
+    document.getElementById('loading').innerHTML =
+      '初始化失败，请查看控制台。<br><br>' +
+      `<span style="color:#e08f8f">${String(err && err.message ? err.message : err)}</span>`;
   }
-}
-
-main();
-
-/* 供 headless 测试脚本与 Godot 侧对照使用的导出（浏览器里无副作用） */
-globalThis.__PLANET__ = {
-  CONFIG, BIOME, BIOME_NAME,
-  buildIcosphere, subdivideIcosahedron, buildDual, buildNeighbors,
-  createTerrain, assignElevation, placeMountainPeaks, mountainDistanceField,
-  applyMountainRidge, assignTemperature, assignWind, solveRainfall, normalizeMoisture,
-  priorityFlood, detectLakes, accumulateFlow, classifyBiome, classifyAllBiomes,
-  paletteAt, waterColorAt, whittakerAt, bakeVertexShading, buildRenderMesh,
-  refreshVertexColors, buildCoastLine, buildLakeShoreSegments, appendRibbon,
-  buildInkGeometry, buildRiverRibbon, hexToRgb01,
-  buildExport, exportJson, drawOutline, setSelected, refreshOutline,
-  get state() { return { T, S, RAIN, LAKE, HYD, TIMING, INK, RIB }; },
-  /** M3 交互状态（验证脚本用） */
-  get hover() {
-    return {
-      hoverRegion, selectedRegion, outlineRegion,
-      visible: !!(hoverObj && hoverObj.visible),
-      color: hoverObj ? '#' + hoverObj.material.color.getHexString() : null,
-      vertices: hoverObj ? hoverObj.geometry.drawRange.count : 0,
-    };
-  },
-  get hoverObj() { return hoverObj; },
-  /** 验证用：按屏幕像素坐标拾取一次（等价于 pointermove + doPick） */
-  pickAt: (x, y) => {
-    pointer.x = (x / window.innerWidth) * 2 - 1;
-    pointer.y = -(y / window.innerHeight) * 2 + 1;
-    pickDirty = true; doPick();
-    return hoverRegion;
-  },
-  /** 验证用：性能剖面（各步耗时 + 总耗时 + 最长单帧 + draw call） */
-  profile: () => {
-    const steps = {};
-    for (const k of Object.keys(TIMING)) if (k[0] !== '_') steps[k] = Number(TIMING[k].toFixed(2));
-    return {
-      level: CONFIG.level, steps,
-      total: TIMING['总耗时'] || 0, maxFrame: TIMING._maxFrame || 0,
-      drawCalls: renderer ? renderer.info.render.calls : 0,
-      triangles: renderer ? renderer.info.render.triangles : 0,
-      under1s: (TIMING['总耗时'] || Infinity) <= 1000,
-    };
-  },
-  // 供验证脚本读取 THREE 侧的 draw call 统计（Godot 侧无对应物）
-  get renderer() { return renderer; },
-  get scene() { return scene; },
-  get camera() { return camera; },
-  get controls() { return controls; },
-  /** 调试用：改完 CONFIG 后强制重建几何（验证脚本用） */
-  rebuild: () => rebuildGeometry(),
-  /** 调试用：改完 CONFIG 后重跑整条因果链（验证脚本用） */
-  regen: () => regenerate(),
-};
-
+});
 </script>
 </body>
 </html>
