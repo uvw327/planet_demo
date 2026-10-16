@@ -2,7 +2,7 @@
 
 > **评审对象**：`archive/v1-biome-globe.html`（Goldberg 球体 · 程序化生物群系星球，level 5 / seed 20261016）
 > **评审日期**：2026-10-16
-> **评审方式**：headless Chromium 实机运行 + 逐图块数据统计（脚本 `planet-test/shot-v1.mjs`）
+> **评审方式**：headless Chromium 实机运行 + 逐图块数据统计（脚本 `tools/shot-v1.mjs`）
 > **证据留存**：`docs/v1-shots/`（截图 8 张 + 原始统计 `v1-stats.json`）
 > **本文档用途**：① 冻结 v1 的实测基线；② 把问题编号化、可勾选化；③ 约定修复顺序与验收口径。
 >
@@ -485,7 +485,7 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 
 ## 5. 统一验收口径（指标台账）
 
-> 修复过程中，把这一表当作"回归看板"。任何阶段结束后，重跑 `planet-test/shot-v1.mjs` 取数填表。
+> 修复过程中，把这一表当作"回归看板"。任何阶段结束后，重跑 `tools/shot-v1.mjs` 取数填表。
 
 | # | 指标 | v1 基线 | 目标 | 当前 |
 | --- | --- | --- | --- | --- |
@@ -556,12 +556,13 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 | `docs/v1-shots/v1-river-only.png` | **只留河流** —— 蛛网/散点，本路线最关键的一张证据 |
 | `docs/v1-shots/v1-desert-rainforest.png` | **只留沙漠 + 雨林** —— 绝对沙漠环与"零过渡"，第二关键 |
 | `docs/v1-shots/v1-stats.json` | 全部原始统计数据（本文档 §1 所有数字的来源） |
-| `planet-test/shot-v1.mjs` | 复现脚本（截图 + 统计，`node shot-v1.mjs v1`） |
+| `tools/shot-v1.mjs` | 复现脚本（截图 + 统计，`node tools/shot-v1.mjs v1`） |
 | `docs/stage-a-shots/stage-a-a0.png` 等 10 张 | **阶段 A 修复后**同视角截图（与 `v1-shots/` 一一对应，可直接对比） |
 | `docs/stage-a-shots/stage-a-desert-grassland.png` | 只留沙漠 + 草原 —— 黄褐与橄榄绿互相咬合的不规则斑块（对比 `v1-desert-rainforest.png` 的纯黄环） |
 | `docs/stage-a-shots/stage-a-stats.json` | 阶段 A 全部原始统计数据（本文档阶段 A 表格的数字来源） |
-| `planet-test/verify-a.mjs` | 阶段 A 验收脚本（实机取数 + 截图，`node verify-a.mjs`） |
-| `planet-test/v1-lab.mjs` | 调参实验室（加载一次页面，在页面内扫 `CONFIG` 组合，`node v1-lab.mjs`） |
+| `tools/verify-stage-a.mjs` | 阶段 A 验收脚本（实机取数 + 截图，`node tools/verify-stage-a.mjs`） |
+| `tools/lab-climate.mjs` | 调参实验室（加载一次页面，在页面内扫 `CONFIG` 组合，`node tools/lab-climate.mjs`） |
+| `tools/README.md` | 脚本环境要求与用法 |
 
 ---
 
