@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Goldberg 球体 · 程序化生物群系星球</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #05070d;
+  }
+
+  canvas { display: block; }
+
+  /* ---------- 左上角信息面板 ---------- */
+  #hud {
+    position: fixed; top: 16px; left: 16px;
+    min-width: 232px;
+    padding: 12px 15px;
+    background: rgba(9, 15, 27, 0.74);
+    border: 1px solid rgba(110, 165, 225, 0.22);
+    border-radius: 10px;
+    backdrop-filter: blur(9px);
+    -webkit-backdrop-filter: blur(9px);
+    color: #cfe2f5;
+    font: 13px/1.75 ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity .16s ease, transform .16s ease;
+  }
+  #hud.visible { opacity: 1; transform: translateY(0); }
+
+  #hud .row { display: flex; justify-content: space-between; gap: 18px; }
+  #hud .k { color: #6b87a6; }
+  #hud .v { color: #ecf5ff; font-weight: 600; }
+
+  /* ---------- 右上角图例 ---------- */
+  #legend {
+    position: fixed; top: 16px; right: 16px;
+    padding: 11px 14px;
+    background: rgba(9, 15, 27, 0.62);
+    border: 1px solid rgba(110, 165, 225, 0.16);
+    border-radius: 10px;
+    backdrop-filter: blur(9px);
+    -webkit-backdrop-filter: blur(9px);
+    font: 12px/1.9 ui-monospace, Consolas, monospace;
+    color: #9db4cc;
+    pointer-events: none;
+  }
+  #legend .item { display: flex; align-items: center; gap: 8px; }
+  #legend .swatch {
+    width: 11px; height: 11px; border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
+  }
+
+  /* ---------- 左下角操作提示 ---------- */
+  #hint {
+    position: fixed; left: 18px; bottom: 14px;
+    font: 12px ui-monospace, Consolas, monospace;
+    color: #47596e;
+  }
+
+  /* ---------- 加载 / 报错 ---------- */
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #6d8aa8;
+    font: 14px ui-monospace, Consolas, monospace;
+    text-align: center;
+    line-height: 1.9;
+    padding: 24px;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="row"><span class="k">生物群系</span><span class="v" id="hud-biome">-</span></div>
+  <div class="row"><span class="k">温&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-temp">-</span></div>
+  <div class="row"><span class="k">湿&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-moist">-</span></div>
+  <div class="row"><span class="k">海&nbsp;&nbsp;&nbsp;&nbsp;拔</span><span class="v" id="hud-elev">-</span></div>
+  <div class="row"><span class="k">纬&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lat">-</span></div>
+  <div class="row"><span class="k">经&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lon">-</span></div>
+  <div class="row"><span class="k">图&nbsp;&nbsp;&nbsp;&nbsp;块</span><span class="v" id="hud-id">-</span></div>
+</div>
+
+<div id="legend"></div>
+
+<div id="hint">拖动旋转 · 滚轮缩放 · 悬停查看图块</div>
+
+<div id="loading">正在生成星球…</div>
+
+<script>
+  // 若 8 秒后仍未初始化成功，说明模块（CDN）加载失败，给出可操作的提示
+  setTimeout(function () {
+    if (!window.__planetReady) {
+      document.getElementById('loading').innerHTML =
+        '加载失败。<br><br>' +
+        '1. 请确认网络可访问 cdn.jsdelivr.net；<br>' +
+        '2. 或在当前目录启动本地服务器后访问：<br>' +
+        '<span style="color:#8fb4d8">python -m http.server 8080</span>';
+    }
+  }, 8000);
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
+
+/* =========================================================================
+ * §0  全局配置
+ * 所有可调参数集中在此，改这里即可换一颗截然不同的星球。
+ * ========================================================================= */
+const CONFIG = {
+  /* --- 星球本体 --- */
+  seed: 20261016,      // 噪声种子：换一个数字就是另一颗星球（结果可复现）
+
+  // level 决定球面精细度，图块数 = 10·4^level + 2。实测（纯算法耗时，不含 WebGL 上传）：
+  //   level 3 →   642 图块 /  3840 三角形 /  生成 ~6 ms   /  642  draw call
+  //   level 4 →  2562 图块 / 15360 三角形 /  生成 ~16 ms  / 2562  draw call   ← 精细度与性能的平衡点
+  //   level 5 → 10242 图块 / 61440 三角形 /  生成 ~65 ms  / 10242 draw call
+  // 注意：level 5 的瓶颈不在生成耗时，而在「每个图块一个 Mesh」带来的上万次 draw call，
+  //       浏览器端会明显掉帧。若要上 level 5，需改为「单一 BufferGeometry + 顶点色」的架构。
+  level: 5,
+
+  /* --- 生物群系判定阈值 --- */
+  seaLevel: 0.35,        // 海平面：elevation 低于此值为海洋
+  seaIceLatitude: 0.93,  // |latitude| 超过此值的海面 → 海冰
+
+  /* --- 气候模型 --- */
+  // 温度由「太阳辐射（cos 纬度）+ 海拔递减」决定，湿度由「三圈环流」纬度带决定，
+  // 两者共同划分气候带，避免出现「冰原旁边长着热带雨林」这类不合理现象。
+  lapseRate: 0.50,        // 海拔递减率：陆地相对高度每 +1，温度下降多少
+  climateScale: 1.50,     // 气候扰动噪声频率
+  tempNoise: 0.05,        // 温度扰动幅度（让等温线不是完美的圆）
+  moistureNoise: 0.30,    // 湿度扰动幅度（让沙漠/森林边界不规则）
+
+  // 温度带阈值（0 = 极寒，1 = 酷热）
+  tempIce: 0.22,          // 低于此值 → 冰原（约 |lat| > 0.975，即纬度 77° 以上）
+  tempTundra: 0.42,       // 低于此值 → 苔原（约纬度 65° 以上）
+  tempTaiga: 0.62,        // 低于此值 → 针叶林（约纬度 52° 以上）
+  tempTropical: 0.85,     // 高于此值 → 热带（约纬度 32° 以内）
+
+  // 湿度阈值（0 = 极干，1 = 极湿）
+  moistureDesert: 0.30,   // 低于此值 → 沙漠
+  moistureGrassland: 0.48,// 低于此值 → 草原，以上 → 森林
+
+  /* --- 地形高度（FBM）--- */
+  continentScale: 0.80,   // 大陆噪声频率：越小 → 大陆越成片
+  continentOctaves: 4,    // 大陆噪声八度
+  continentWeight: 0.65,  // 大陆噪声权重（其余为细节噪声）
+  detailScale: 3.00,      // 细节噪声频率：越大 → 地形越碎
+  detailOctaves: 6,       // 细节噪声八度
+
+  /* --- 高度分布标准化（保证海陆比可预测）--- */
+  elevationCenter: 0.45,  // 高度分布的"中心"位置
+  elevationSpread: 0.30,  // 高度分布的"展开"幅度：越大 → 海洋与高山都更多
+
+  /* --- 河流（脊线噪声）--- */
+  riverScale: 2.20,          // 河流噪声频率：越大 → 河网越密
+  riverWidth: 0.13,          // 河流判定阈值：越大 → 河越宽（实测影响约 4~5% 的图块）
+  riverMaxElevation: 0.62,   // 河流出现的海拔上限
+
+  /* --- 立体感 --- */
+  // 本星球是「选择出生地」的俯视界面，不是可供 3D 角色行走的地形。
+  // 山脉与平原的视觉差别由贴图/颜色表达（类似 RimWorld 的平面地图），
+  // 因此刻意保持一个完全光滑的球面，不做任何高度起伏。
+  // 若将来确实需要高低起伏，把下面这行改为 true 即可恢复「共享顶点半径」的隆起方案（无缝隙）。
+  enableHeightOffset: false,
+  heightScale: 0.10,         // 隆起幅度，仅在 enableHeightOffset 为 true 时生效
+
+  /* --- 其他 --- */
+  enableRotation: false,     // 行星自转
+  rotationSpeed: 0.05,       // 自转速度（弧度/秒）
+  debugAssert: true,         // 是否在控制台输出自测结果
+};
+
+/* =========================================================================
+ * §1  常量表与工具函数
+ * ========================================================================= */
+
+/** 生物群系枚举 */
+const BIOME = {
+  OCEAN:      'ocean',       // 海洋
+  SEA_ICE:    'seaIce',      // 极地海冰
+  RIVER:      'river',       // 河流
+  DESERT:     'desert',      // 沙漠（炎热 + 干旱）
+  GRASSLAND:  'grassland',   // 草原（半干旱）
+  FOREST:     'forest',      // 温带森林
+  RAINFOREST: 'rainforest',  // 热带雨林（炎热 + 湿润）
+  TAIGA:      'taiga',       // 针叶林（寒温带）
+  TUNDRA:     'tundra',      // 苔原（亚寒带）
+  MOUNTAIN:   'mountain',    // 山脉
+  SNOW:       'snow',        // 雪峰
+  ICE:        'ice',         // 极地冰原
+};
+
+/** 生物群系 → 纯色（后续可替换为手绘贴图） */
+const BIOME_COLOR = {
+  [BIOME.OCEAN]:      0x1a3a6b,
+  [BIOME.SEA_ICE]:    0xcfe2ee,
+  [BIOME.RIVER]:      0x3a9bd9,
+  [BIOME.DESERT]:     0xe0c56e,
+  [BIOME.GRASSLAND]:  0x9ab54f,
+  [BIOME.FOREST]:     0x3d8c40,
+  [BIOME.RAINFOREST]: 0x1f6b2e,
+  [BIOME.TAIGA]:      0x2f6b4f,
+  [BIOME.TUNDRA]:     0x8b9683,
+  [BIOME.MOUNTAIN]:   0x7a7a7a,
+  [BIOME.SNOW]:       0xf0f0f0,
+  [BIOME.ICE]:        0xdce8f2,
+};
+
+/** 生物群系 → HUD 中文名 */
+const BIOME_LABEL = {
+  [BIOME.OCEAN]:      '海洋',
+  [BIOME.SEA_ICE]:    '海冰',
+  [BIOME.RIVER]:      '河流',
+  [BIOME.DESERT]:     '沙漠',
+  [BIOME.GRASSLAND]:  '草原',
+  [BIOME.FOREST]:     '温带森林',
+  [BIOME.RAINFOREST]: '热带雨林',
+  [BIOME.TAIGA]:      '针叶林',
+  [BIOME.TUNDRA]:     '苔原',
+  [BIOME.MOUNTAIN]:   '山脉',
+  [BIOME.SNOW]:       '雪峰',
+  [BIOME.ICE]:        '冰原',
+};
+
+/** 高度阶梯阈值（高山与低地气候无关，单独处理） */
+const SNOW_LEVEL     = 0.80;
+const MOUNTAIN_LEVEL = 0.65;
+
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const clamp   = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/**
+ * mulberry32：32 位种子伪随机数生成器，返回 [0,1) 的浮点数。
+ * 用它替代 Math.random，使地形完全可复现。
+ */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* =========================================================================
+ * §2  噪声
+ * 注意：three 的 SimplexNoise 构造函数调用的是 r.random()，
+ *      因此必须传入「带 random() 方法的对象」，不能直接传函数。
+ * ========================================================================= */
+const rng = mulberry32(CONFIG.seed);
+const noise = new SimplexNoise({ random: rng });
+
+// 五路互不相关的固定偏移，避免不同频率的噪声在原点附近产生关联
+const OFFSET_A = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 大陆
+const OFFSET_B = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 细节
+const OFFSET_C = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 河流
+const OFFSET_D = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 温度扰动
+const OFFSET_E = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 湿度扰动
+
+/** 统一的 3D 噪声采样入口（返回约 [-1, 1]，便于将来替换噪声实现） */
+function sampleNoise3D(x, y, z) {
+  return noise.noise3d(x, y, z);
+}
+
+/**
+ * 分形布朗运动（FBM）：多个八度的噪声叠加，得到更自然的地形。
+ * @returns 归一化到约 [-1, 1] 的值
+ */
+function fbm3(p, octaves, lacunarity, gain, offset) {
+  let amp = 1, freq = 1, sum = 0, norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * sampleNoise3D(
+      p.x * freq + offset.x,
+      p.y * freq + offset.y,
+      p.z * freq + offset.z,
+    );
+    norm += amp;
+    amp  *= gain;
+    freq *= lacunarity;
+  }
+  return sum / norm;
+}
+
+/* =========================================================================
+ * §3  球体网格生成（二十面体 → 细分 → 对偶图）
+ * ========================================================================= */
+
+/**
+ * 构造正二十面体。
+ * 顶点来自标准公式 (±1, ±φ, 0) 的轮换，其模长约为 1.902，
+ * 因此必须逐个 normalize()，否则 center.y 不再等于 sin(纬度)。
+ */
+function buildIcosahedron() {
+  const t = (1 + Math.sqrt(5)) / 2;
+  const raw = [
+    [-1,  t,  0], [ 1,  t,  0], [-1, -t,  0], [ 1, -t,  0],
+    [ 0, -1,  t], [ 0,  1,  t], [ 0, -1, -t], [ 0,  1, -t],
+    [ t,  0, -1], [ t,  0,  1], [-t,  0, -1], [-t,  0,  1],
+  ];
+  const vertices = raw.map((v) => new THREE.Vector3(v[0], v[1], v[2]).normalize());
+
+  const faces = [
+    [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+    [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+    [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+    [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+  ];
+  return { vertices, faces };
+}
+
+/**
+ * 递归细分：每个三角形一分为四，中点归一化投影到单位球面。
+ * 必须用 Map 缓存边中点，保证共享边两侧引用的是同一个顶点索引。
+ */
+function subdivide(vertices, faces, level) {
+  for (let iter = 0; iter < level; iter++) {
+    const cache = new Map();  // 边 → 中点顶点索引
+
+    const getMidpoint = (i, j) => {
+      // 数值键：min*1e6 + max。顶点总数远小于 1e6（level=4 时 V=2562），键唯一
+      const key = Math.min(i, j) * 1e6 + Math.max(i, j);
+      let idx = cache.get(key);
+      if (idx !== undefined) return idx;
+
+      const v = vertices[i].clone().add(vertices[j]).normalize();
+      idx = vertices.push(v) - 1;
+      cache.set(key, idx);
+      return idx;
+    };
+
+    const next = [];
+    for (const [a, b, c] of faces) {
+      const ab = getMidpoint(a, b);
+      const bc = getMidpoint(b, c);
+      const ca = getMidpoint(c, a);
+      next.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+    faces = next;
+  }
+  return { vertices, faces };
+}
+
+/**
+ * 求对偶图，得到 Goldberg 多面体。
+ *
+ * 返回值契约：
+ *   dualPos  : Vector3[]  长度 = faces.length，每个元素是某三角形的归一化重心
+ *   polygons : [{ center, vertexIndices }]
+ *     - center        : 对应的原网格顶点（单位向量），即对偶面的中心
+ *     - vertexIndices : 环形排序后指向 dualPos 的下标，长度为 5 或 6
+ *
+ * 不变式：polygons.length === vertices.length，且 polygons[i] 对应 vertices[i]；
+ *         其中恰好 12 个多边形的 vertexIndices.length === 5（五边形）。
+ *
+ * 关键：这里只保存【索引】而不拷贝坐标，渲染坐标统一由 §5 的 renderPos 给出，
+ *      这是「顶点偏移不产生缝隙」的前提。
+ */
+function buildDual(vertices, faces) {
+  // 1) 对偶顶点 = 每个三角形的归一化重心，索引与 faces 一一对应
+  const dualPos = faces.map(([a, b, c]) => new THREE.Vector3()
+    .add(vertices[a])
+    .add(vertices[b])
+    .add(vertices[c])
+    .divideScalar(3)
+    .normalize());
+
+  // 2) 原网格顶点 → 相邻三角形索引
+  const vertexFaces = Array.from({ length: vertices.length }, () => []);
+  faces.forEach((f, fi) => {
+    for (const vi of f) vertexFaces[vi].push(fi);
+  });
+
+  // 3) 每个原顶点生成一个对偶面（多边形）
+  const HELPER_X = new THREE.Vector3(1, 0, 0);
+  const HELPER_Y = new THREE.Vector3(0, 1, 0);
+  const U = new THREE.Vector3();
+  const W = new THREE.Vector3();
+  const D = new THREE.Vector3();
+
+  const polygons = [];
+  for (let vi = 0; vi < vertices.length; vi++) {
+    const n = vertices[vi];
+
+    // 构造切平面正交基。该构造恒满足 u × w = n，因此环序从球外看始终为逆时针。
+    const helper = Math.abs(n.x) < 0.9 ? HELPER_X : HELPER_Y;
+    U.crossVectors(helper, n).normalize();
+    W.crossVectors(n, U);
+
+    // 把相邻三角形重心投影到切平面，按极角排序得到环绕顺序
+    const ring = vertexFaces[vi].map((fi) => {
+      const p = dualPos[fi];
+      D.copy(p).addScaledVector(n, -p.dot(n));   // 去掉法线分量 → 切平面投影
+      return { fi, ang: Math.atan2(D.dot(W), D.dot(U)) };
+    });
+    ring.sort((x, y) => x.ang - y.ang);
+
+    polygons.push({
+      center: n.clone(),
+      vertexIndices: ring.map((x) => x.fi),
+    });
+  }
+
+  return { dualPos, polygons };
+}
+
+/* =========================================================================
+ * §4  地形生成
+ * ========================================================================= */
+
+/**
+ * 陆地隆起量：海面保持半径 1，陆地按海拔线性抬升。
+ *
+ * 注意：默认配置下 `enableHeightOffset` 为 false，本函数恒返回 0，
+ * 因此整个球面是半径严格为 1 的光滑球体（无任何高低起伏）。
+ * 保留这段实现，是为了将来若需要立体感可以直接开启。
+ */
+function displacement(elevation) {
+  if (!CONFIG.enableHeightOffset) return 0;
+  if (elevation <= CONFIG.seaLevel) return 0;         // 海洋压平
+  const t = (elevation - CONFIG.seaLevel) / (1 - CONFIG.seaLevel);
+  return t * CONFIG.heightScale;
+}
+
+/**
+ * 计算所有图块的海拔。
+ *
+ * 分两步：
+ *   1. 用「大陆噪声 + 细节噪声」混合出原始高度（连续、自然）；
+ *   2. 对全体样本做高斯标准化，把分布映射到可预测的范围。
+ *
+ * 第 2 步很关键：原始 FBM 的取值集中在均值附近，若直接使用，
+ * elevation 会挤在中段，海平面 0.35 会切出难以预期的海陆比。
+ * 标准化之后，elevationCenter / elevationSpread 两个参数就能
+ * 稳定地控制海陆比例与地形起伏强度。
+ */
+function computeElevations(tiles) {
+  const raw = tiles.map((tile) => {
+    const pC = tile.center.clone().multiplyScalar(CONFIG.continentScale);
+    const pD = tile.center.clone().multiplyScalar(CONFIG.detailScale);
+
+    const continent01 = fbm3(pC, CONFIG.continentOctaves, 2.0, 0.5, OFFSET_A) * 0.5 + 0.5;
+    const detail01    = fbm3(pD, CONFIG.detailOctaves,    2.0, 0.5, OFFSET_B) * 0.5 + 0.5;
+
+    return CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
+  });
+
+  // 统计均值与标准差
+  const mean = raw.reduce((s, v) => s + v, 0) / raw.length;
+  const variance = raw.reduce((s, v) => s + (v - mean) * (v - mean), 0) / raw.length;
+  const std = Math.sqrt(variance) || 1e-6;
+
+  // 标准化（z-score）后线性映射到 0~1
+  for (let i = 0; i < tiles.length; i++) {
+    const z = (raw[i] - mean) / std;
+    tiles[i].elevation = clamp01(CONFIG.elevationCenter + z * CONFIG.elevationSpread);
+  }
+}
+
+/**
+ * 河流判定：用另一路噪声的「零值线」构造网状水系。
+ * |noise| 越接近 0 的地方越可能是河道；河道随海拔升高而变窄。
+ */
+function isRiver(center, elevation) {
+  if (elevation <= CONFIG.seaLevel + 0.02) return false;        // 海面附近不算河
+  if (elevation > CONFIG.riverMaxElevation) return false;       // 高山雪线以上不算河
+
+  const p = center.clone().multiplyScalar(CONFIG.riverScale);
+  const r = Math.abs(sampleNoise3D(
+    p.x + OFFSET_C.x, p.y + OFFSET_C.y, p.z + OFFSET_C.z,
+  ));
+
+  // t: 0 靠近海平面 → 1 接近高山；河道近海宽、源头窄
+  const t = (elevation - CONFIG.seaLevel) / (CONFIG.riverMaxElevation - CONFIG.seaLevel);
+  const width = CONFIG.riverWidth * (0.4 + 0.6 * (1 - t));
+  return r < width;
+}
+
+/**
+ * 纬向基础湿度 —— 三圈环流模型。
+ *
+ * 大气环流决定了降水在地球上的带状分布，这条规律与温度无关：
+ *   赤道（|lat| ≈ 0.00）  上升气流 → 湿润   （热带雨林带）
+ *   副热带（≈ 0.40）      下沉气流 → 干旱   （撒哈拉、阿拉伯、澳洲沙漠带）
+ *   中纬（≈ 0.72）        西风带   → 湿润   （温带森林带）
+ *   极地（≈ 1.00）        下沉气流 → 干旱
+ *
+ * 参数 absLat 为 |sin(地理纬度)|，返回 0~1 的基础湿度（调用方需 clamp）。
+ */
+function latitudinalMoisture(absLat) {
+  const wetEquator   = Math.exp(-Math.pow(absLat / 0.30, 2));
+  const wetMidLat    = Math.exp(-Math.pow((absLat - 0.72) / 0.26, 2));
+  // 干旱带的中心与宽度需要贴近真实：约 15°~35°（|lat| 0.26~0.57），
+  // 太宽会把中纬度的温带森林和草原一起吃掉。
+  const drySubtropic = Math.exp(-Math.pow((absLat - 0.40) / 0.16, 2));
+  return Math.max(wetEquator, wetMidLat) * 1.15 - drySubtropic * 0.85;
+}
+
+/**
+ * 计算一个图块的气候（温度、湿度），结果写回 tile 上。
+ *
+ * 温度：以太阳辐射为基础 —— 太阳高度角随纬度下降，入射能量正比于 cos(纬度)，
+ *       而 center.y === sin(纬度)，所以 cos(纬度) = sqrt(1 - lat²)。
+ *       再按「陆地相对高度」做气温直减（海拔越高越冷）。
+ *
+ * 湿度：三圈环流的纬向基础值，叠加噪声让气候边界不规则（避免出现完美的环带）。
+ */
+function computeClimate(tile) {
+  const lat = tile.latitude;
+  const absLat = Math.abs(lat);
+
+  // --- 温度 ---
+  const insolation = Math.sqrt(Math.max(0, 1 - lat * lat));   // = cos(地理纬度)
+  // 陆地相对高度：海平面处为 0，最高峰为 1（这样平原不会平白无故被降温）
+  const landRelief = Math.max(0, (tile.elevation - CONFIG.seaLevel) / (1 - CONFIG.seaLevel));
+  const tempJitter = sampleNoise3D(
+    tile.center.x * CONFIG.climateScale + OFFSET_D.x,
+    tile.center.y * CONFIG.climateScale + OFFSET_D.y,
+    tile.center.z * CONFIG.climateScale + OFFSET_D.z,
+  );
+  tile.temperature = clamp01(
+    insolation - landRelief * CONFIG.lapseRate + tempJitter * CONFIG.tempNoise,
+  );
+
+  // --- 湿度 ---
+  const moistJitter = sampleNoise3D(
+    tile.center.x * CONFIG.climateScale + OFFSET_E.x,
+    tile.center.y * CONFIG.climateScale + OFFSET_E.y,
+    tile.center.z * CONFIG.climateScale + OFFSET_E.z,
+  );
+  tile.moisture = clamp01(
+    latitudinalMoisture(absLat) + moistJitter * CONFIG.moistureNoise,
+  );
+}
+
+/**
+ * 生物群系分类。
+ *
+ * 判定顺序即优先级：
+ *     海洋/海冰 > 高山（雪峰、山脉）> 极地冰原 > 河流 > 温度带 > 湿度带
+ *
+ * 说明：
+ * - 高山单独处理，因为雪线与纬度无关（赤道上的乞力马扎罗同样有冰川）。
+ * - 河流晚于冰原判定，因此不会在冰盖上出现河道。
+ * - 温度带负责「冰原 / 苔原 / 针叶林 / 温带 / 热带」的南北分异，
+ *   湿度带负责在温带与热带内部区分「沙漠 / 草原 / 森林」。
+ *   两者缺一不可 —— 只靠温度做不出沙漠（赤道与副热带温度相近，
+ *   差别全部来自降水）。
+ */
+function classifyBiome(tile) {
+  const { elevation, latitude, river, temperature, moisture } = tile;
+  const absLat = Math.abs(latitude);
+
+  // 1. 海洋：极地海面结冰
+  if (elevation <= CONFIG.seaLevel) {
+    return absLat > CONFIG.seaIceLatitude ? BIOME.SEA_ICE : BIOME.OCEAN;
+  }
+
+  // 2. 高山：雪线以上为雪峰，其次为裸露山脉。与纬度无关
+  if (elevation > SNOW_LEVEL) return BIOME.SNOW;
+  if (elevation > MOUNTAIN_LEVEL) return BIOME.MOUNTAIN;
+
+  // 3. 极地冰盖
+  if (temperature < CONFIG.tempIce) return BIOME.ICE;
+
+  // 4. 河流：陆地上各气候带都可能出现（包括穿越沙漠的过境河）
+  if (river) return BIOME.RIVER;
+
+  // 5. 温度带：由寒到暖
+  if (temperature < CONFIG.tempTundra) return BIOME.TUNDRA;
+  if (temperature < CONFIG.tempTaiga) return BIOME.TAIGA;
+
+  // 6. 温带 / 热带：在温度带内部再按湿度划分
+  if (moisture < CONFIG.moistureDesert) return BIOME.DESERT;
+  if (moisture < CONFIG.moistureGrassland) return BIOME.GRASSLAND;
+  return temperature > CONFIG.tempTropical ? BIOME.RAINFOREST : BIOME.FOREST;
+}
+
+/* =========================================================================
+ * §5  几何与渲染
+ * ========================================================================= */
+
+/**
+ * 计算每个对偶顶点的半径（方案 B）。
+ *
+ * 对偶顶点 i 对应原网格中的三角形 faces[i]，它被 3 个多边形共享。
+ * 半径取这 3 个多边形海拔的平均值，因此：
+ *   - 每个对偶顶点只有唯一半径；
+ *   - 任意两个相邻多边形引用同一条边的两个端点时，坐标完全相同 → 不会出现缝隙。
+ */
+function computeDualRadius(faces, polygons) {
+  const radius = new Float64Array(faces.length);
+  for (let fi = 0; fi < faces.length; fi++) {
+    const [a, b, c] = faces[fi];
+    const avgElevation =
+      (polygons[a].elevation + polygons[b].elevation + polygons[c].elevation) / 3;
+    radius[fi] = 1 + displacement(avgElevation);
+  }
+  return radius;
+}
+
+/**
+ * 为一个图块构建几何体：把 n 边形展开成 n 个三角形组成的扇形。
+ *
+ * 扇心取「中心方向 × 顶点平均半径」，而不是顶点坐标的算术平均：
+ * 后者会落到球体内部（造成内凹），且在顶点半径不等时会偏离面片平面。
+ */
+function buildTileGeometry(tile) {
+  const verts = tile.vertices;
+  const n = verts.length;
+
+  let sumR = 0;
+  for (const v of verts) sumR += v.length();
+  const avgR = sumR / n;
+
+  // center 本身已是单位向量，无需再次归一化
+  const cx = tile.center.x * avgR;
+  const cy = tile.center.y * avgR;
+  const cz = tile.center.z * avgR;
+
+  const positions = new Float32Array(n * 9);
+  let o = 0;
+  for (let i = 0; i < n; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % n];
+    positions[o++] = cx; positions[o++] = cy; positions[o++] = cz;  // 扇心
+    positions[o++] = a.x; positions[o++] = a.y; positions[o++] = a.z;
+    positions[o++] = b.x; positions[o++] = b.y; positions[o++] = b.z;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.computeBoundingSphere();   // 供 raycast 快速剔除
+  return geo;
+}
+
+/* =========================================================================
+ * §6  场景搭建
+ * ========================================================================= */
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+
+const camera = new THREE.PerspectiveCamera(
+  50, window.innerWidth / window.innerHeight, 0.1, 200,
+);
+camera.position.set(0, 0.7, 2.9);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.6;
+controls.zoomSpeed = 0.9;
+controls.enablePan = false;
+controls.minDistance = 1.35;
+controls.maxDistance = 9;
+
+const planetGroup = new THREE.Group();
+scene.add(planetGroup);
+
+/** 简单的星空背景，纯装饰 */
+function createStarfield() {
+  const COUNT = 700;
+  const positions = new Float32Array(COUNT * 3);
+  const random = mulberry32(CONFIG.seed ^ 0x5F3759DF);
+  for (let i = 0; i < COUNT; i++) {
+    // 在半径 30~60 的球壳上均匀取点
+    const u = random() * 2 - 1;
+    const theta = random() * Math.PI * 2;
+    const r = 30 + random() * 30;
+    const s = Math.sqrt(1 - u * u);
+    positions[i * 3]     = r * s * Math.cos(theta);
+    positions[i * 3 + 1] = r * u;
+    positions[i * 3 + 2] = r * s * Math.sin(theta);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({
+    color: 0x9fb6d0, size: 0.16, sizeAttenuation: true,
+    transparent: true, opacity: 0.75,
+  });
+  const stars = new THREE.Points(geo, mat);
+  stars.matrixAutoUpdate = false;
+  return stars;
+}
+scene.add(createStarfield());
+
+/* =========================================================================
+ * §7  交互：射线拾取、高亮、HUD
+ * ========================================================================= */
+
+let tileMeshes = [];               // 只装图块 mesh，供 raycaster 使用
+let hoveredTile = null;
+let needsPick = false;
+let pointerInside = false;
+
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+const HIGHLIGHT_COLOR = new THREE.Color(0xffffff);
+const tmpColor = new THREE.Color();
+
+const hudEl = document.getElementById('hud');
+const hudBiome = document.getElementById('hud-biome');
+const hudTemp = document.getElementById('hud-temp');
+const hudMoist = document.getElementById('hud-moist');
+const hudElev = document.getElementById('hud-elev');
+const hudLat = document.getElementById('hud-lat');
+const hudLon = document.getElementById('hud-lon');
+const hudId = document.getElementById('hud-id');
+
+function updateHud(tile) {
+  // center.y 即 sin(地理纬度)；经度以 +Z 为 0°、向东为正
+  const latDeg = Math.asin(clamp(tile.center.y, -1, 1)) * 180 / Math.PI;
+  const lonDeg = Math.atan2(tile.center.x, tile.center.z) * 180 / Math.PI;
+
+  hudBiome.textContent = BIOME_LABEL[tile.biome];
+  hudTemp.textContent = tile.temperature.toFixed(3);
+  hudMoist.textContent = tile.moisture.toFixed(3);
+  hudElev.textContent = tile.elevation.toFixed(3);
+  hudLat.textContent = `${latDeg >= 0 ? 'N' : 'S'} ${Math.abs(latDeg).toFixed(1)}°`;
+  hudLon.textContent = `${lonDeg >= 0 ? 'E' : 'W'} ${Math.abs(lonDeg).toFixed(1)}°`;
+  hudId.textContent = `#${tile.index} · ${tile.vertexIndices.length} 边形`;
+}
+
+function updateHover() {
+  if (!pointerInside) {
+    applyHover(null);
+    return;
+  }
+  // OrbitControls 只改了相机的位置与朝向，matrixWorld 要到 render 时才刷新。
+  // 这里主动更新一次，保证拾取结果与当前画面同步（否则快速旋转时会有 1 帧延迟）。
+  camera.updateMatrixWorld();
+  raycaster.setFromCamera(pointerNDC, camera);
+  // 只对图块 mesh 做拾取：planetGroup 里将来可能混入描边、光晕等对象，会被误命中
+  const hits = raycaster.intersectObjects(tileMeshes, false);
+  applyHover(hits.length > 0 ? hits[0].object.userData.tile : null);
+}
+
+function applyHover(tile) {
+  if (tile === hoveredTile) return;
+
+  // 复原上一个图块
+  if (hoveredTile) {
+    hoveredTile.mesh.material.color.copy(hoveredTile.baseColor);
+  }
+
+  hoveredTile = tile;
+
+  if (tile) {
+    tmpColor.copy(tile.baseColor).lerp(HIGHLIGHT_COLOR, 0.38);
+    tile.mesh.material.color.copy(tmpColor);
+    updateHud(tile);
+    hudEl.classList.add('visible');
+  } else {
+    hudEl.classList.remove('visible');
+  }
+}
+
+function setupInteraction() {
+  const dom = renderer.domElement;
+
+  dom.addEventListener('pointermove', (ev) => {
+    const rect = dom.getBoundingClientRect();
+    pointerNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    pointerInside = true;
+    needsPick = true;      // 真正的拾取合并到动画循环中执行
+  });
+
+  dom.addEventListener('pointerleave', () => {
+    pointerInside = false;
+    needsPick = true;
+  });
+}
+
+/* =========================================================================
+ * §8  动画循环与窗口自适应
+ * ========================================================================= */
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = clock.getDelta();
+  if (CONFIG.enableRotation) {
+    planetGroup.rotation.y += CONFIG.rotationSpeed * dt;
+  }
+
+  controls.update();
+
+  if (needsPick) {
+    updateHover();
+    needsPick = false;
+  }
+
+  renderer.render(scene, camera);
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener('resize', onResize);
+
+/* =========================================================================
+ * §9  图例
+ * ========================================================================= */
+function buildLegend() {
+  const el = document.getElementById('legend');
+  // 按气候带由冷到热排列，便于对照
+  const order = [
+    BIOME.OCEAN, BIOME.SEA_ICE, BIOME.RIVER,
+    BIOME.ICE, BIOME.TUNDRA, BIOME.TAIGA,
+    BIOME.FOREST, BIOME.RAINFOREST, BIOME.GRASSLAND,
+    BIOME.DESERT, BIOME.MOUNTAIN, BIOME.SNOW,
+  ];
+  el.innerHTML = order.map((b) => {
+    const hex = '#' + BIOME_COLOR[b].toString(16).padStart(6, '0');
+    return `<div class="item"><span class="swatch" style="background:${hex}"></span>${BIOME_LABEL[b]}</div>`;
+  }).join('');
+}
+
+/* =========================================================================
+ * §10  自测：验证网格与地形数据是否符合预期
+ * ========================================================================= */
+function runSelfTest(tiles) {
+  const rows = [];
+  const check = (name, ok, detail) => rows.push({ name, ok: !!ok, detail: detail ?? '' });
+
+  const expectedFaces = 10 * 4 ** CONFIG.level + 2;
+  check('图块总数', tiles.length === expectedFaces, `${tiles.length} / 期望 ${expectedFaces}`);
+
+  const pentagons = tiles.filter((t) => t.vertexIndices.length === 5).length;
+  const hexagons = tiles.filter((t) => t.vertexIndices.length === 6).length;
+  check('五边形数量 = 12', pentagons === 12, `${pentagons}`);
+  check('其余均为六边形', pentagons + hexagons === tiles.length, `六边形 ${hexagons}`);
+
+  check('elevation ∈ [0,1]', tiles.every((t) => t.elevation >= 0 && t.elevation <= 1));
+  check('center 为单位向量', tiles.every((t) => Math.abs(t.center.length() - 1) < 1e-9));
+  check('无 NaN', tiles.every((t) =>
+    Number.isFinite(t.center.x + t.center.y + t.center.z) && Number.isFinite(t.elevation)));
+
+  // 无缝隙：同一个对偶顶点索引，在任何图块中都必须指向同一个 Vector3 实例
+  let sharedRefs = true;
+  const owner = new Map();
+  for (const t of tiles) {
+    for (let i = 0; i < t.vertexIndices.length; i++) {
+      const key = t.vertexIndices[i];
+      if (owner.has(key)) {
+        if (owner.get(key) !== t.vertices[i]) sharedRefs = false;
+      } else {
+        owner.set(key, t.vertices[i]);
+      }
+    }
+  }
+  check('共享顶点为同一引用（无缝隙）', sharedRefs);
+
+  // 生物群系统计
+  const stats = {};
+  for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
+  const statText = Object.keys(BIOME_LABEL)
+    .map((b) => `${BIOME_LABEL[b]} ${stats[b] || 0}`)
+    .join(' · ');
+
+  console.groupCollapsed(
+    `%c[自测] Goldberg 球体 · level=${CONFIG.level} · ${tiles.length} 个图块`,
+    'color:#6cf;font-weight:bold',
+  );
+  console.table(rows.map((r) => ({
+    检查项: r.name, 结果: r.ok ? '✅ 通过' : '❌ 失败', 详情: r.detail,
+  })));
+  console.log('生物群系分布：' + statText);
+  console.log(`海洋占比：${(((stats[BIOME.OCEAN] || 0) / tiles.length) * 100).toFixed(1)}%`);
+  console.groupEnd();
+
+  const failed = rows.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    console.error('自测未通过：', failed.map((r) => r.name).join('、'));
+  }
+  return { rows, stats };
+}
+
+/* =========================================================================
+ * §11  启动
+ * ========================================================================= */
+function init() {
+  // --- 1. 生成球体网格（对偶图）---
+  const ico  = buildIcosahedron();                                    // 12 个已归一化顶点 / 20 面
+  const mesh = subdivide(ico.vertices, ico.faces, CONFIG.level);      // 细分并投影到单位球面
+  const dual = buildDual(mesh.vertices, mesh.faces);                  // { dualPos, polygons }
+
+  const tiles = dual.polygons;
+  tiles.forEach((tile, i) => { tile.index = i; });
+
+  // --- 2. 生成地形数据 ---
+  computeElevations(tiles);                       // 批量计算并标准化海拔
+  for (const tile of tiles) {
+    tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
+    tile.river    = isRiver(tile.center, tile.elevation);
+    computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
+    tile.biome    = classifyBiome(tile);
+  }
+
+  // --- 3. 计算渲染坐标 ---
+  // 关闭高度偏移时，直接复用归一化后的对偶顶点：
+  // 所有图块共享同一批 Vector3 实例，球面严格为半径 1 的光滑球面，
+  // 相邻图块共享边的坐标完全一致 —— 既无缝隙，也无高低疙瘩。
+  let renderPos;
+  if (CONFIG.enableHeightOffset) {
+    const dualRadius = computeDualRadius(mesh.faces, tiles);   // 方案 B：共享半径
+    renderPos = dual.dualPos.map((p, i) => p.clone().multiplyScalar(dualRadius[i]));
+  } else {
+    renderPos = dual.dualPos;
+  }
+
+  // --- 4. 构建图块 ---
+  planetGroup.clear();
+  tileMeshes = [];
+
+  for (const tile of tiles) {
+    // 4.1 拓扑索引 → 渲染坐标。多个图块会共享同一批 Vector3 实例，故共享边坐标完全一致
+    tile.vertices = tile.vertexIndices.map((i) => renderPos[i]);
+
+    let sumR = 0;
+    for (const v of tile.vertices) sumR += v.length();
+    tile.avgRadius = sumR / tile.vertices.length;
+
+    // 4.2 几何体 + 独立材质。
+    //     必须为每个图块 new 一个材质，禁止按 biome 缓存共享，
+    //     否则悬停高亮会污染所有同色图块。
+    const geometry = buildTileGeometry(tile);
+    const material = new THREE.MeshBasicMaterial({
+      color: BIOME_COLOR[tile.biome],
+      side: THREE.DoubleSide,   // 防御性措施：环序实际已自洽
+    });
+
+    const tileMesh = new THREE.Mesh(geometry, material);
+    tileMesh.userData.tile = tile;
+
+    // 图块的位置完全由几何体的顶点坐标决定，mesh 自身永不移动。
+    // 关掉矩阵自动更新，可省去每帧 N 次（level=4 时 2562 次）无意义的本地矩阵重算。
+    // 注意：若将来需要单独移动某个图块，必须把 matrixAutoUpdate 改回 true。
+    tileMesh.matrixAutoUpdate = false;
+    tileMesh.updateMatrix();
+
+    tile.mesh = tileMesh;
+    tile.baseColor = new THREE.Color(BIOME_COLOR[tile.biome]);   // 悬停复原用，必须在此初始化
+
+    tileMeshes.push(tileMesh);
+    planetGroup.add(tileMesh);
+  }
+
+  // --- 5. 交互与循环 ---
+  setupInteraction();
+  buildLegend();
+
+  if (CONFIG.debugAssert) runSelfTest(tiles);
+
+  animate();
+
+  const loadingEl = document.getElementById('loading');
+  if (loadingEl) loadingEl.remove();
+  window.__planetReady = true;
+
+  console.log(
+    `%c星球生成完毕：level=${CONFIG.level}，图块 ${tiles.length} 个，` +
+    `其中五边形 ${tiles.filter((t) => t.vertexIndices.length === 5).length} 个。`,
+    'color:#6cf',
+  );
+  console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
+}
+
+// 延后一帧执行，让 loading 文案有机会被绘制出来
+requestAnimationFrame(() => {
+  try {
+    init();
+  } catch (err) {
+    console.error(err);
+    document.getElementById('loading').innerHTML =
+      '初始化失败，请查看控制台。<br><br>' +
+      `<span style="color:#e08f8f">${String(err && err.message ? err.message : err)}</span>`;
+  }
+});
+</script>
+</body>
+</html>
