@@ -179,15 +179,30 @@ const CONFIG = {
   moistureGrassland: 0.65,// 低于此值 → 草原，以上 → 森林
 
   /* --- 地形高度（FBM）--- */
-  continentScale: 0.80,   // 大陆噪声频率：越小 → 大陆越成片
-  continentOctaves: 4,    // 大陆噪声八度
+  // ★ 地基改造：把「一块 96.83% 的超大陆」拆成「一个主大陆 + 若干次级大陆」。
+  //   实测（landFraction 0.38 下扫 cs × cOct × dOct，见 docs/terrain-shots/）：
+  //     cs=0.80 cOct=4 dOct=6 → 最大陆块 38.8% 陆地 · 39 块 · 单格孤岛 12  ← 旧值，M3 不达标
+  //     cs=1.20 cOct=2 dOct=2 → 最大陆块 48.1% 陆地 · 26 块 · 单格孤岛  2  ← 现选值
+  //   两条经验：
+  //     ① 降陆地占比本身就会把超大陆拆开（陆地从多数相变成少数相），所以 cs 只调 0.8→1.2；
+  //     ② detailOctaves 原来给到 6，最细八度频率 = detailScale·2^5 = 96，特征尺度 0.6°，
+  //        **细过图块本身**（level 5 图块间距约 2.0°）—— 等于给每个格子加纯随机噪声，
+  //        既是单格孤岛的主因，也是"海岸线碎成渣"的主因。降到 2 后最细特征约 9.5°（≈5 格）。
+  continentScale: 1.20,   // 大陆噪声频率：越小 → 大陆越成片（0.80 会给出单块超大陆）
+  continentOctaves: 2,    // 大陆噪声八度：只留大尺度，海岸线的碎度交给 detailScale
   continentWeight: 0.65,  // 大陆噪声权重（其余为细节噪声）
   detailScale: 3.00,      // 细节噪声频率：越大 → 地形越碎
-  detailOctaves: 6,       // 细节噪声八度
+  detailOctaves: 2,       // 细节噪声八度：别让最细八度细过网格（见上）
 
-  /* --- 高度分布标准化（保证海陆比可预测）--- */
-  elevationCenter: 0.45,  // 高度分布的"中心"位置
-  elevationSpread: 0.30,  // 高度分布的"展开"幅度：越大 → 海洋与高山都更多
+  /* --- 海陆比与高度分布 --- */
+  // ★ 地基改造（阶段 D 的前置）：陆地占比从「靠 elevationCenter 猜」改为「分位精确命中」。
+  //   旧写法 elevation = elevationCenter + z·spread，海平面 0.35 只在这个分布上随手切一刀，
+  //   于是陆地占比是三个参数的**副作用**，实测 62.87%（半个星球都是陆地），想改只能试错。
+  //   新写法把 z 的「第 (1 − landFraction) 分位」直接对齐到海平面，Land 的格子数就
+  //   **精确等于** landFraction × 图块数。为什么非要精确：陆地占比是所有群系占比的分母
+  //   （"雪峰 ≤ 12%" 是"占陆地"），分母飘一点，下游所有目标数字都要重新推导。
+  landFraction: 0.38,     // 目标陆地占比：0.38 约为地球的 1.3 倍，且能自然裂成数块大陆
+  elevationSpread: 0.30,  // 海拔自海平面向上的展开幅度：越大 → 陆地越"高"、高山雪峰越多
 
   /* --- 河流（脊线噪声）--- */
   riverScale: 2.20,          // 河流噪声频率：越大 → 河网越密
@@ -472,35 +487,56 @@ function displacement(elevation) {
 /**
  * 计算所有图块的海拔。
  *
- * 分两步：
+ * 分三步：
  *   1. 用「大陆噪声 + 细节噪声」混合出原始高度（连续、自然）；
- *   2. 对全体样本做高斯标准化，把分布映射到可预测的范围。
+ *   2. 对全体样本做 z-score 标准化，得到无量纲的 z；
+ *   3. 「分位锚定」：把 z 的第 (1 − landFraction) 分位对齐到海平面，再按 elevationSpread 向上展开。
  *
- * 第 2 步很关键：原始 FBM 的取值集中在均值附近，若直接使用，
- * elevation 会挤在中段，海平面 0.35 会切出难以预期的海陆比。
- * 标准化之后，elevationCenter / elevationSpread 两个参数就能
- * 稳定地控制海陆比例与地形起伏强度。
+ * 第 3 步是地基改造的关键。旧写法是 `elevation = elevationCenter + z · spread`，
+ * 海平面 0.35 只是在这个分布上随手切一刀 —— 陆地占比
+ * `P(elevation > seaLevel)` 是 elevationCenter / elevationSpread / seaLevel 三个参数的
+ * **副作用**，想要多少陆地只能靠试错（实测 62.87%，即"半个星球都是陆地"）。
+ *
+ * 分位锚定让陆地占比变成一个**精确命中**的输入：先把 z 排序取出分位点 zAtSea，再令
+ *     elevation = seaLevel + (z − zAtSea) · spread
+ * 于是 `elevation > seaLevel ⇔ z > zAtSea ⇔ 恰好 landFraction 比例的图块`（分位数取整误差 ≤ 1 格）。
+ * 好处有二：① 海陆比可以直接写在 CONFIG 里；② spread 与海陆比彻底解耦 ——
+ * spread 只负责"陆地有多高"，不再偷偷改变海陆比。
+ *
+ * clamp01 只在最顶端收口（约 0.6% 的极高点落到 1.0），它们远高于海平面，
+ * 因此既不影响海陆比，也不影响分位锚定的精确性。
  */
 function computeElevations(tiles) {
-  const raw = tiles.map((tile) => {
-    const pC = tile.center.clone().multiplyScalar(CONFIG.continentScale);
-    const pD = tile.center.clone().multiplyScalar(CONFIG.detailScale);
+  const n = tiles.length;
+  const z = new Float64Array(n);
+
+  // 1. 原始高度：低频「大陆」噪声（决定大陆形状）+ 高频「细节」噪声（决定海岸线细节）
+  let sum = 0, sum2 = 0;
+  for (let i = 0; i < n; i++) {
+    const c = tiles[i].center;
+    const pC = c.clone().multiplyScalar(CONFIG.continentScale);
+    const pD = c.clone().multiplyScalar(CONFIG.detailScale);
 
     const continent01 = fbm3(pC, CONFIG.continentOctaves, 2.0, 0.5, OFFSET_A) * 0.5 + 0.5;
     const detail01    = fbm3(pD, CONFIG.detailOctaves,    2.0, 0.5, OFFSET_B) * 0.5 + 0.5;
 
-    return CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
-  });
+    const raw = CONFIG.continentWeight * continent01 + (1 - CONFIG.continentWeight) * detail01;
+    z[i] = raw;
+    sum += raw; sum2 += raw * raw;
+  }
 
-  // 统计均值与标准差
-  const mean = raw.reduce((s, v) => s + v, 0) / raw.length;
-  const variance = raw.reduce((s, v) => s + (v - mean) * (v - mean), 0) / raw.length;
-  const std = Math.sqrt(variance) || 1e-6;
+  // 2. z-score 标准化
+  const mean = sum / n;
+  const std = Math.sqrt(Math.max(1e-12, sum2 / n - mean * mean));
+  for (let i = 0; i < n; i++) z[i] = (z[i] - mean) / std;
 
-  // 标准化（z-score）后线性映射到 0~1
-  for (let i = 0; i < tiles.length; i++) {
-    const z = (raw[i] - mean) / std;
-    tiles[i].elevation = clamp01(CONFIG.elevationCenter + z * CONFIG.elevationSpread);
+  // 3. 分位锚定（TypedArray 的 sort 默认就是数值升序，无需比较函数）
+  const sorted = z.slice().sort();
+  const k = clamp(Math.floor((1 - CONFIG.landFraction) * n), 0, n - 1);
+  const zAtSea = sorted[k];
+
+  for (let i = 0; i < n; i++) {
+    tiles[i].elevation = clamp01(CONFIG.seaLevel + (z[i] - zAtSea) * CONFIG.elevationSpread);
   }
 }
 
@@ -636,6 +672,27 @@ function classifyBiome(tile) {
   if (moisture < CONFIG.moistureDesert) return BIOME.DESERT;
   if (moisture < CONFIG.moistureGrassland) return BIOME.GRASSLAND;
   return temperature > CONFIG.tempTropical ? BIOME.RAINFOREST : BIOME.FOREST;
+}
+
+/**
+ * 重跑「海拔 → 河流 → 气候 → 群系」这条纯计算链（不碰渲染层）。
+ *
+ * 这条链只依赖 CONFIG 与图块的球面坐标，与渲染层完全解耦。而默认
+ * `enableHeightOffset === false` 时海拔**不参与顶点坐标**（球面恒为半径 1），
+ * 因此改完 CONFIG 只要调一次本函数就能看到新星球，不必重建几何体、也不必重载页面。
+ * 这正是调参实验室（tools/lab-terrain.mjs）能在一次页面加载里扫几十组参数的原因。
+ *
+ * 唯一与渲染层相关的字段是 `baseColor`，它由 `repaintAll()` 从 `biome` 重新派生，
+ * 所以这里只负责把 `biome` 算对，颜色的事交给调用方。
+ */
+function recomputeTerrain() {
+  computeElevations(tiles);
+  for (const tile of tiles) {
+    tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
+    tile.river    = isRiver(tile.center, tile.elevation);
+    computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
+    tile.biome    = classifyBiome(tile);
+  }
 }
 
 /* =========================================================================
@@ -1390,14 +1447,8 @@ function init() {
   tiles = dual.polygons;
   tiles.forEach((tile, i) => { tile.index = i; });
 
-  // --- 2. 生成地形数据 ---
-  computeElevations(tiles);                       // 批量计算并标准化海拔
-  for (const tile of tiles) {
-    tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
-    tile.river    = isRiver(tile.center, tile.elevation);
-    computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
-    tile.biome    = classifyBiome(tile);
-  }
+  // --- 2. 生成地形数据（海拔 → 河流 → 气候 → 群系，纯计算，不碰渲染）---
+  recomputeTerrain();
 
   // --- 3. 计算渲染坐标 ---
   // 关闭高度偏移时，直接复用归一化后的对偶顶点：
@@ -1530,13 +1581,11 @@ function init() {
       return keep ? keep.size : 'all';
     },
 
-    /** 重跑「河流 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
+    /** 重跑整条地形链「海拔 → 河流 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
     refresh() {
+      recomputeTerrain();
       const stats = {};
       for (const tile of tiles) {
-        tile.river = isRiver(tile.center, tile.elevation);
-        computeClimate(tile);
-        tile.biome = classifyBiome(tile);
         tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
         stats[tile.biome] = (stats[tile.biome] || 0) + 1;
       }
