@@ -577,6 +577,14 @@ M2.5/M3 那条路线（顶点色插值 + 纸纹颗粒 + 烘焙光照 + 贴花墨
 > → 草原 22.05 → 26.06%、沙漠 17.66 → **22.26%**（M5 因此需要口径改写，见下）、
 > 雨林 9.92 → 12.23%、针叶林 9.69 → 12.62%、苔原 4.42 → 3.96%、冰原 1.0 → 0.93%。
 > **M1/M2/M3 逐格不变**（造山带只抬升"已经是陆地"的格子），M8–M11/M26–M28 无退步。
+>
+> ⚠️ **★ 2026-10-16：`CONFIG.level` 由用户从 5 上调到 6**（图块 10242 → 40962，
+> 三角形 61440 → 245760，手机真机实测流畅）。level 只改网格精细度，**不改任何算法**：
+> 比例型指标几乎不动（M1 38.00%、M2 48.1%、M3 2、M6 9.78%、M29 5.96、M30 95.9%），
+> 计数型指标按面积 ×4（赤道雪峰 31 → 126 格、clamp 收口 40 → 163 格）。
+> **下表"当前"列保留各阶段验收时的原始记录（level 5）**，以免把 6 个阶段的台账改乱；
+> level 6 的逐项对照见 §8「level 6 再基线」，权威取数仍是
+> `docs/terrain-shots/terrain-stats.json`（已按 level 6 刷新）。
 
 | # | 指标 | v1 基线 | 目标 | 当前 |
 | --- | --- | --- | --- | --- |
@@ -674,19 +682,20 @@ M5 原本的 `8%–18%` 是在"山脉+雪峰吃掉 24.16% 陆地"的前提下标
 | `docs/render-shots/render-desert-grassland.png` | **重构后**只留沙漠 + 草原（顶点色筛选，draw call 仍为 1） |
 | `docs/render-shots/render-ore-markers.png` | **重构后**矿石层（40 份矿，1 个 InstancedMesh） |
 | `docs/render-shots/pixel-diff-before.png` / `-after.png` | **像素级证明**的原始裁剪图（选中前 / 选中后，80×80） |
-| `tools/verify-render.mjs` | 渲染架构验收脚本（hook WebGL 数真实 draw call + 功能断言 + 截图，`node tools/verify-render.mjs merged`） |
-| `tools/out/merged-render.json` / `tools/out/v1-render.json` | 同环境 A/B 的全部原始数据（`docs/render-architecture.md` 所有数字的来源；`tools/out/` 不入库） |
+| `tools/verify-render.mjs` | 渲染架构验收脚本（hook WebGL 数真实 draw call + 功能断言 + 截图）。`node tools/verify-render.mjs merged`（level 5 归档轮）/ `node tools/verify-render.mjs l6`（level 6 再基线，截图前缀 `render-l6-*`，不覆盖归档） |
+| `tools/out/merged-render.json` / `tools/out/v1-render.json` / `tools/out/l6-render.json` | 同环境 A/B 与 level 6 再基线的全部原始数据（`docs/render-architecture.md` 所有数字的来源；`tools/out/` 不入库） |
+| `docs/render-shots/render-l6-{ui-hover,selected-center,close-selected,desert-grassland,ore-markers}.png` | **level 6 再基线**的渲染证据（与 `render-*.png` 的 level 5 归档轮对照） |
 | `docs/render-architecture.md` | **渲染架构重构施工单**：方案、`triToTile` 建立方式、取舍理由、验收对照 |
-| `docs/terrain-shots/terrain-{000,090,180,270}.png` | **阶段 D 后**四视角成品图（山脉成链、雪线随纬度升降） |
-| `docs/terrain-shots/terrain-ui.png` | **阶段 D 后** UI 证据：图例分两组（气候群系 / 覆盖层）+ HUD「造山带」读数 |
-| `docs/terrain-shots/terrain-stats.json` | 全部原始指标（本文档 M1–M19 / M29–M30 当前值的来源；阶段 D 后已刷新） |
+| `docs/terrain-shots/terrain-{000,090,180,270}.png` | **阶段 D 后 + level 6** 四视角成品图（山脉成链、雪线随纬度升降） |
+| `docs/terrain-shots/terrain-ui.png` | **阶段 D 后 + level 6** UI 证据：图例分两组（气候群系 / 覆盖层）+ HUD「造山带」读数 |
+| `docs/terrain-shots/terrain-stats.json` | 全部原始指标（本文档 M1–M19 / M29–M30 的来源；**已按 level 6 刷新**，含 `orogeny` 与 `buildTimings` 块） |
 | `docs/terrain-shots/candidates/` | **参数是怎么选出来的**：4 个候选组 × 4 个视角（`ref-默认` / `A-cs1.0` / `B-cs1.2` / `C-cs1.2-d6`） |
 | `tools/verify-terrain.mjs` | 地形地基 + H1 + **阶段 D** 验收脚本（30 条断言 + v1 口径对照 + 4 视角截图 + 1 张 UI 截图，`node tools/verify-terrain.mjs`） |
 | `tools/lab-terrain.mjs` | 地形调参实验室（通用多轴扫描，页面内扫 `landFraction / continentScale / *Octaves / *Scale / continentWeight / elevationSpread`） |
 | `tools/shot-terrain.mjs` | 候选参数对比截图（同一页面内切参数各截 4 个视角） |
 | `docs/terrain-foundation.md` | **地形地基施工单**：分位锚定、多大陆参数如何选出、数据再基线、取舍与回滚 |
-| `docs/orogeny-shots/globe-a{000,060,120,180,240,300}.png` | **阶段 D** 全球 6 视角（默认配色，看整体观感） |
-| `docs/orogeny-shots/band-a{000,090,180,270}.png` | **阶段 D**「只显示山脉 + 雪峰」4 视角 —— 与 `docs/v1-shots/v1-a0.png` 的灰白团块直接对比，是"成带 vs 团块"最直观的证据 |
+| `docs/orogeny-shots/globe-a{000,060,120,180,240,300}.png` | **阶段 D + level 6** 全球 6 视角（默认配色，看整体观感） |
+| `docs/orogeny-shots/band-a{000,090,180,270}.png` | **阶段 D + level 6**「只显示山脉 + 雪峰」4 视角 —— 与 `docs/v1-shots/v1-a0.png` 的灰白团块直接对比，是"成带 vs 团块"最直观的证据 |
 | `docs/orogeny-shots/focus-{low,high}-{far,near,near-band}.png` | **阶段 D** 聚焦近景：低纬山带（雪线 + 两侧群系过渡）与极地山带（常年覆雪） |
 | `tools/lab-orogeny.mjs` | **阶段 D** 造山带调参实验室（扫 `bands / width / mtn / gain / minLen / maxLen / peak* / tempSnow / elevationSpread`，输出山脉占比、**带形长宽比**、赤道雪峰、红线回归，并自动跑一遍 v1 口径对照） |
 | `tools/shot-orogeny.mjs` | **阶段 D** 截图脚本（全球 6 视角 + 山地隔离 4 视角 + 2 个聚焦近景；内置"背景色格数"探针防止群系筛选未关） |
@@ -906,3 +915,56 @@ H1 是这套架构的**纯重构第一步**：把"河流"从群系表里拆出�
 
 **回滚**：`git revert <阶段 D 提交>`。只想关掉山：`CONFIG.orogenyGain = 0`（立刻退回无山旧地貌）；
 想换一批山：改 `CONFIG.seed` 或 `orogenyBands` 后 `__PLANET__.refresh()`。
+
+---
+
+### level 5 → 6 再基线｜2026-10-16
+
+**背景**：阶段 D 验收通过后，用户为了"看着更平滑、更舒服"把 `CONFIG.level` 从 5 改成 6，
+并在**手机真机实测流畅**。这是**一行配置改动**，但它让全部台账的"计数型"指标 ×4，
+所以必须再跑一遍验收、重新出图，并把这条记下来。
+
+**改了什么**：
+
+| # | 位置 | 改前 → 改后 | 理由 |
+| --- | --- | --- | --- |
+| 1 | `CONFIG.level` | `5 → 6` | 球面更平滑（图块间距 2.0° → 1.0°）。draw call 与图块数无关（渲染重构的成果），所以只受生成耗时约束 |
+| 2 | `CONFIG.level` 注释 | 补 level 6 行（40962 / 245760 / ~175 ms）+ 指向 `__PLANET__.buildTimings` | 注释里的耗时数字以后不再靠估算 |
+| 3 | `gfx.buildTimings` + `__PLANET__.buildTimings` | 新增 | **生成耗时探针**（纯算法：网格+地形 / 打包几何体），调 level 时直接读真数；控制台也会打印 |
+| 4 | `tools/verify-terrain.mjs` | 页面守卫加 `buildTimings`；汇总打印生成耗时；`S.buildTimings` 入库 | 让 level 决策有可核验的数据，而不是"感觉快了" |
+| 5 | `docs/render-architecture.md` | §1 手机条改为"真机已确认"；§2.2 加 level 5/6 对照列；§2.3 重写 | 当初"真机未测"的如实说明现在可以结案了，而且是在**比当初多 4 倍面数**的前提下结的 |
+
+**结果（`node tools/verify-terrain.mjs` → 30/30 全过，退出码 0）**：
+
+| 指标 | level 5 | **level 6** | 判定 |
+| --- | --- | --- | --- |
+| 图块 / 三角形 | 10242 / 61440 | **40962 / 245760** | ×4.0 |
+| M1 陆地占比 | 37.99% | **38.00%** | ✅ 分位锚定精确命中，不变 |
+| M2 最大陆块占陆地 | 48.1% | **48.1%** | ✅ 不变 |
+| M3 单格孤岛 | 2 | **2** | ✅ 不变 |
+| M6 山脉+雪峰占陆地 | 9.89% | **9.78%** | ✅ ≤12% |
+| M29 带形·面积加权长宽比 | 6.83 | **5.96** | ✅ ≥2.5（细格子把带边缘锯齿也描出来了） |
+| M30 长条覆盖山地面积占比 | 95.8% | **95.9%** | ✅ |
+| 赤道雪峰（\|lat\|<0.3） | 31 格 | **126 格** | ✅ ×4 |
+| clamp01 收口 | 40 格（陆地 1.03%） | **163 格（陆地 1.05%）** | 观测项，比例不变 |
+| draw call / Mesh | 2 / 1 | **2 / 1** | ✅ 不变 |
+| 生成耗时（纯算法） | ~65 ms | **175.2 ms**（网格+地形 116.5 / 打包 58.7） | 亚线性 |
+| 页面自测 | 22/22 | **22/22** | ✅ |
+| 阶段 A 四条红线 / M8–M11 / M26–M28 | 全过 | **全过** | ✅ 无退步 |
+
+**结论：level 6 没有引入任何回归。** 所有"比例型"指标在 ±0.2 个百分点内，
+所有"计数型"指标严格 ×4，结构型指标（M1/M2/M3/M25）一格不动。
+
+**渲染侧复核**（`node tools/verify-render.mjs l6`，同一个 WebGL hook）：
+draw call **仍 2**、Mesh **仍 1**、`badTriangles = 0`、拾取往返 **369/369 = 100%**、
+高亮/选中**不新建 Mesh**（`lineLoopCount 1` + 局部上传）、放矿 draw call **2 → 4**（只 +1）。
+SwiftShader 下的帧间隔 p50 由 50.0 → **83.3 ms**（软件光栅化，三角形 ×4 的必然结果；
+手机 GPU 的结论是用户实测流畅）。明细见 `docs/render-architecture.md` §2.4。
+
+**已知代价**：缓冲从约 3.2 MB 涨到约 13 MB（position/normal/color 各 ≈3.4 MB + index ≈2.9 MB）；
+生成耗时 65 → 175 ms（一次性，不在渲染循环里）。手机端已实测流畅。
+
+**证据**：`docs/terrain-shots/`（4 视角 + UI + `terrain-stats.json` 全部按 level 6 刷新）、
+`docs/orogeny-shots/`（16 张全部按 level 6 重新生成）。
+
+**回滚**：`CONFIG.level = 5`（一行）。所有指标会回到上表左列。

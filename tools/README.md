@@ -60,6 +60,7 @@ window.__PLANET__ = {
   tiles, world,                       // world = { ore, oreAmount, owner, hydro }
   /* 渲染层句柄 */
   scene, camera, renderer, controls, planetGroup, gfx,
+  buildTimings,                       // 生成耗时（纯算法）：{ level, tiles, triangles, terrainMs, geometryMs, totalMs }
   /* 渲染 → 业务的映射表 */
   triToTile, tileVertStart, tileVertCount,
   /* 拾取与选中 */
@@ -80,6 +81,12 @@ window.__PLANET__ = {
 因为地形 / 气候 / 分类都是纯函数（只依赖 `CONFIG` 与图块数据），所以改完 `CONFIG` 直接调
 `__PLANET__.refresh()` 就能看到新结果，**不必重建几何体、也不必重载页面**。
 调参时每次重载约 1 分钟，这个出口能省掉绝大部分等待。对正常浏览无任何影响。
+
+⚠️ **`CONFIG.level` 现在是 6**（图块 **40962** / 三角形 **245760**，间距约 1.0°）。
+脚本里**别写死图块数 / 三角形数 / 边数**：level → level+1 这些量都 ×4。
+当前值：图块 40962、三角形 245760、邻接边 122880、顶点 286722、生成耗时约 175 ms。
+想读真数用 `__PLANET__.buildTimings`（见上表），或看控制台启动日志。
+"比例型"指标（陆地占比、山脉占比…）与 level 无关；"计数型"指标（赤道雪峰格数…）会 ×4。
 
 ⚠️ **`refresh()` 现在包含海拔**（地形地基之后）。改前它只重跑"气候 → 群系"，
 所以"改 `landFraction` 再 `refresh()`"根本不会生效。现在它调 `recomputeTerrain()`，
@@ -105,6 +112,13 @@ window.__PLANET__ = {
 `orogeny >= CONFIG.orogenyMountain`。雪峰由**温度**判定（`temperature < CONFIG.tempSnow`）。
 `CONFIG.SNOW_LEVEL` / `MOUNTAIN_LEVEL` 已删除 —— 用旧口径量山地会得到完全不同的数。
 
+⚠️ **别用 `Select-Object -First N` 去截这些脚本的输出。** PowerShell 会在第 N 行之后
+停止读取管道，但**不会立刻杀掉 node**：它会带着自己的 headless Chrome 继续在后台跑完，
+与下一条命令的实例**并发写同一批 PNG/JSON**，于是截图被后写的一方覆盖成半成品
+（曾经出现 `terrain-090.png` 只剩 3.8 KB 的全黑图）。要么让输出完整打印，
+要么重定向到文件（`node tools/x.mjs *> $env:TEMP\x.log`）。
+`verify-terrain.mjs` 已加**体积哨兵**：PNG < 12 KB 会打印 `⚠ … 星球可能不在画面里`。
+
 `archive/v1-biome-globe.html`（v1 基线快照）**没有**这个出口，所以 `shot-v1.mjs` 只能用
 `Array.prototype.push` 钩子从 `Mesh.userData.tile` 反向取图块，并靠对象去重
 （`tileMeshes.push` 与 `planetGroup.add` 会各 push 一次同一个 mesh）。
@@ -113,7 +127,8 @@ window.__PLANET__ = {
 
 - `shot-v1.mjs` → `docs/v1-shots/`
 - `verify-render.mjs` → `docs/render-shots/`（v1 模式写 `docs/render-shots/v1-baseline-*.png`，
-  **不要**写进 `docs/v1-shots/`，那是 v1 归档证据）
+  **不要**写进 `docs/v1-shots/`，那是 v1 归档证据；tag 非 `v1`/`merged` 时前缀是
+  `render-<tag>`，例如 `node tools/verify-render.mjs l6` → `render-l6-*.png`，**不覆盖**归档轮）
 - `verify-stage-a.mjs` → `docs/stage-a-shots/`（旧地形上的历史证据，勿覆盖）
 - `verify-terrain.mjs` → `docs/terrain-shots/`（`terrain-*.png` + `terrain-stats.json`）
 - `shot-terrain.mjs` → `docs/terrain-shots/candidates/`

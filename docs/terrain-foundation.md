@@ -165,6 +165,11 @@ node tools/verify-terrain.mjs        # 17 条断言 + 4 张截图 + docs/terrain
 
 实测输出（level 5 / seed 20261016 / 10242 图块）：
 
+> **注（2026-10-16）**：脚本现已扩到 **30 条断言**（H1 覆盖层守卫 + 阶段 D 造山带/雪线），
+> 且 `CONFIG.level` 已上调到 **6**（40962 图块）。下面这段是**地形地基当时的原始输出**，
+> 保留作历史记录；当前值见 `docs/terrain-shots/terrain-stats.json` 与
+> `docs/v1-biome-globe-review.md` §8「level 5 → 6 再基线」。
+
 ```
 ✅ M1 陆地占比 ∈ [30, 45]%                37.99%
 ✅ M2 最大陆块占陆地 ∈ [40, 70]%             48.1%

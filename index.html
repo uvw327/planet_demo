@@ -144,13 +144,17 @@ const CONFIG = {
   seed: 20261016,      // 噪声种子：换一个数字就是另一颗星球（结果可复现）
 
   // level 决定球面精细度，图块数 = 10·4^level + 2。实测（纯算法耗时，不含 WebGL 上传）：
-  //   level 3 →   642 图块 /  3840 三角形 /  生成 ~6 ms
-  //   level 4 →  2562 图块 / 15360 三角形 /  生成 ~16 ms
-  //   level 5 → 10242 图块 / 61440 三角形 /  生成 ~65 ms   ← 现选值
+  //   level 3 →    642 图块 /   3840 三角形 /  生成 ~6 ms
+  //   level 4 →   2562 图块 /  15360 三角形 /  生成 ~16 ms
+  //   level 5 →  10242 图块 /  61440 三角形 /  生成 ~65 ms
+  //   level 6 →  40962 图块 / 245760 三角形 /  生成 ~175 ms  ← 现选值
+  //            （网格+地形 116.5 ms / 打包几何体 58.7 ms；实测值可在控制台或
+  //              __PLANET__.buildTimings 读到，别照抄这里的注释）
   // 渲染架构（渲染重构后）：所有图块合并成 1 个 BufferGeometry + 顶点色（见 §7），
   //   draw call 与图块数**无关**（星球恒 1 次；星空 / 描边 / 矿石各自 +1），
-  //   所以 level 只受「生成耗时」约束 —— 这正是敢上 level 5 的前提。
-  level: 5,
+  //   所以 level 只受「生成耗时」约束 —— 这正是敢上 level 6 的前提
+  //   （手机真机已实测 level 6 流畅，见 docs/render-architecture.md §2.3）。
+  level: 6,
 
   /* --- 生物群系判定阈值 --- */
   seaLevel: 0.35,        // 海平面：elevation 低于此值为海洋
@@ -201,7 +205,8 @@ const CONFIG = {
   //     ① 降陆地占比本身就会把超大陆拆开（陆地从多数相变成少数相），所以 cs 只调 0.8→1.2；
   //     ② detailOctaves 原来给到 6，最细八度频率 = detailScale·2^5 = 96，特征尺度 0.6°，
   //        **细过图块本身**（level 5 图块间距约 2.0°）—— 等于给每个格子加纯随机噪声，
-  //        既是单格孤岛的主因，也是"海岸线碎成渣"的主因。降到 2 后最细特征约 9.5°（≈5 格）。
+  //        既是单格孤岛的主因，也是"海岸线碎成渣"的主因。降到 2 后最细特征约 9.5°
+  //        （level 5 ≈5 格、level 6 ≈10 格，都远粗于网格，所以上调 level 不会复发）。
   continentScale: 1.20,   // 大陆噪声频率：越小 → 大陆越成片（0.80 会给出单块超大陆）
   continentOctaves: 2,    // 大陆噪声八度：只留大尺度，海岸线的碎度交给 detailScale
   continentWeight: 0.65,  // 大陆噪声权重（其余为细节噪声）
@@ -1817,6 +1822,11 @@ function runSelfTest(tiles) {
  * §11  启动
  * ========================================================================= */
 function init() {
+  // 生成耗时探针：只量"纯算法"（网格 → 地形 → 打包几何体），不含 WebGL 上传与首帧。
+  // 挂在 gfx.buildTimings 上并导出到 __PLANET__，这样调 level 时能直接读到真实数字，
+  // 不用再靠估算（CONFIG.level 的注释就引用这里的输出）。
+  const tBuildStart = performance.now();
+
   // --- 1. 生成球体网格（对偶图）---
   const ico  = buildIcosahedron();                                    // 12 个已归一化顶点 / 20 面
   const mesh = subdivide(ico.vertices, ico.faces, CONFIG.level);      // 细分并投影到单位球面
@@ -1828,6 +1838,7 @@ function init() {
   // --- 2. 生成地形数据（海拔 → 气候 → 群系，纯计算，不碰渲染）---
   //     H2 会在气候之后接上水文（海拔 + 湿度 + 温度 三者齐备才能算产流与填平）。
   recomputeTerrain();
+  const tBuildTerrain = performance.now();
 
   // --- 3. 计算渲染坐标 ---
   // 关闭高度偏移时，直接复用归一化后的对偶顶点：
@@ -1866,6 +1877,15 @@ function init() {
   gfx.tileVertCount = packed.tileVertCount;
   gfx.colors = packed.colors;
   gfx.colorAttr = packed.geometry.attributes.color;
+
+  // 生成耗时（纯算法）：terrainMs 是「网格 + 地形链」，geometryMs 是「打包几何体」
+  const tBuildEnd = performance.now();
+  gfx.buildTimings = {
+    level: CONFIG.level, tiles: tiles.length, triangles: packed.triCount,
+    terrainMs: +(tBuildTerrain - tBuildStart).toFixed(1),
+    geometryMs: +(tBuildEnd - tBuildTerrain).toFixed(1),
+    totalMs: +(tBuildEnd - tBuildStart).toFixed(1),
+  };
 
   // 4.4 唯一的一份材质。顶点色负责表达群系，因此**不需要**按群系拆分材质。
   //     side 用 FrontSide：环序已由 buildDual 保证正面朝外，背面永远被自身遮住，
@@ -1910,6 +1930,11 @@ function init() {
     `三角形 ${packed.triCount} 个 · draw call ${drawCalls} 次/帧`,
     'color:#6cf;font-weight:bold',
   );
+  console.log(
+    `%c生成耗时（纯算法）：合计 ${gfx.buildTimings.totalMs} ms` +
+    `（网格+地形 ${gfx.buildTimings.terrainMs} ms / 打包几何体 ${gfx.buildTimings.geometryMs} ms）`,
+    'color:#6cf',
+  );
   console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
 
   // --- 7. 调参 / 集成出口 ---
@@ -1927,6 +1952,7 @@ function init() {
     scene, camera, renderer, controls, planetGroup,
     gfx,
     get planetMesh() { return gfx.mesh; },
+    buildTimings: gfx.buildTimings,       // 生成耗时（纯算法），调 level 时看这里
 
     /* 渲染 → 业务 的映射 */
     triToTile: gfx.triToTile,

@@ -28,8 +28,10 @@ const PAGE = toUrl(process.env.PLANET_PAGE || path.join(ROOT, 'index.html'));
 const PORT = process.env.CDP_PORT || 9421;
 // 两种模式都写进 docs/render-shots/，用文件名前缀区分。
 // 注意不要写进 docs/v1-shots/ —— 那是 v1 基线的归档证据，不能被后来者覆盖。
+// TAG 除了 v1 / merged 之外还可以是别的（例如 l6 = level 6 再基线），
+// 这时前缀变成 `render-<TAG>`，**不会**覆盖 merged 那一轮的归档图。
 const OUT = path.join(ROOT, 'docs', 'render-shots');
-const FILE_PREFIX = TAG === 'v1' ? 'v1-baseline' : 'render';
+const FILE_PREFIX = TAG === 'v1' ? 'v1-baseline' : (TAG === 'merged' ? 'render' : `render-${TAG}`);
 
 const profile = fs.mkdtempSync(path.join(process.env.TEMP ?? '.', 'cdp-render-'));
 const child = spawn(CHROME, ['--headless=new', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',

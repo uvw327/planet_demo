@@ -76,10 +76,12 @@ const env = await evaluate(`(() => {
   if (P.CONFIG.tempSnow === undefined) return { ok: false, why: 'CONFIG.tempSnow 缺失（雪线未改成温度口径）' };
   if (P.CONFIG.orogenyLandZ === undefined) return { ok: false, why: 'CONFIG.orogenyLandZ 缺失（山带未"种在大陆上"）' };
   if (!P.tiles.every((t) => t.orogeny !== undefined)) return { ok: false, why: '图块缺 orogeny 字段' };
-  return { ok: true, level: P.CONFIG.level, seed: P.CONFIG.seed, tiles: P.tiles.length };
+  if (!P.buildTimings) return { ok: false, why: 'buildTimings 缺失（生成耗时探针）' };
+  return { ok: true, level: P.CONFIG.level, seed: P.CONFIG.seed, tiles: P.tiles.length, build: P.buildTimings };
 })()`);
 if (!env.ok) throw new Error(`页面状态不对：${env.why}（先关掉残留的 headless Chrome）`);
 console.log(`页面就绪：level=${env.level} seed=${env.seed} 图块 ${env.tiles} 个`);
+console.log(`生成耗时（纯算法）：合计 ${env.build.totalMs} ms（网格+地形 ${env.build.terrainMs} / 打包几何体 ${env.build.geometryMs}）`);
 
 /* ---------- 页面内一次性定义几何分析器（供「阶段 D 口径」与「v1 口径」复用） ---------- */
 await evaluate(`(() => {
@@ -314,6 +316,7 @@ const S = await evaluate(`(() => {
 
   return {
     level: C.level, seed: C.seed, n,
+    buildTimings: P.buildTimings,
     // 参数快照（验收时的真实生效值）
     params: {
       landFraction: C.landFraction, elevationSpread: C.elevationSpread, seaLevel: C.seaLevel,
@@ -494,12 +497,25 @@ console.log(`指标已写入 ${path.relative(ROOT, path.join(OUT, 'terrain-stats
 
 /* ---------- 截图 ---------- */
 const hideUI = () => evaluate(`(() => { for (const id of ['hud','legend','hint']) { const e = document.getElementById(id); if (e) e.style.display='none'; } return 1; })()`);
+/**
+ * 截图 + **体积哨兵**。
+ * 一整屏背景色（星球没画出来 / 顶点色上传被吞掉）的 1254×644 PNG 只有几 KB，
+ * 而真实成品图在 level 5/6 都是 35–50 KB。这个判据曾经抓住过
+ * "两次验收脚本并发写同一批文件、其中一次截图时星球不在画面里"的污染。
+ */
+const shot = async (name) => {
+  const s = await send('Page.captureScreenshot', { format: 'png' });
+  const buf = Buffer.from(s.data, 'base64');
+  fs.writeFileSync(path.join(OUT, `${name}.png`), buf);
+  const kb = buf.length / 1024;
+  if (buf.length < 12000) console.log(`     ⚠ ${name}.png 只有 ${kb.toFixed(1)} KB —— 星球可能不在画面里`);
+  return kb;
+};
 await hideUI();
 for (const a of [0, 90, 180, 270]) {
   await evaluate(`(() => { const G = window.__PLANET__.planetGroup; G.rotation.x = 0; G.rotation.y = ${a} * Math.PI / 180; return 1; })()`);
   await sleep(1300);
-  const s = await send('Page.captureScreenshot', { format: 'png' });
-  fs.writeFileSync(path.join(OUT, `terrain-${String(a).padStart(3, '0')}.png`), Buffer.from(s.data, 'base64'));
+  await shot(`terrain-${String(a).padStart(3, '0')}`);
 }
 console.log(`截图 → ${path.relative(ROOT, OUT)}\\terrain-{0,90,180,270}.png`);
 
@@ -519,7 +535,11 @@ const hovered = await evaluate(`(() => {
 })()`);
 await sleep(1100);
 const uiShot = await send('Page.captureScreenshot', { format: 'png' });
-fs.writeFileSync(path.join(OUT, 'terrain-ui.png'), Buffer.from(uiShot.data, 'base64'));
+{
+  const buf = Buffer.from(uiShot.data, 'base64');
+  fs.writeFileSync(path.join(OUT, 'terrain-ui.png'), buf);
+  if (buf.length < 12000) console.log(`     ⚠ terrain-ui.png 只有 ${(buf.length / 1024).toFixed(1)} KB —— 星球可能不在画面里`);
+}
 await evaluate(`window.__PLANET__.setHovered(-1)`);       // 恢复，避免影响后续调用
 console.log(`UI 证据（图例两组 + HUD「水系」占位）→ ${path.relative(ROOT, path.join(OUT, 'terrain-ui.png'))}`);
 console.log(`  H1 状态：hydro=${JSON.stringify(hovered.hydro)} overlays=${JSON.stringify(hovered.overlays)} 悬停图块 #${hovered.best}`);
