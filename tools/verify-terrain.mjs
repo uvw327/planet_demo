@@ -1,5 +1,5 @@
 /**
- * 地形地基验收：实机加载 index.html，量全部「陆块结构 + 群系占比」指标，
+ * 地形地基验收（含 H1 覆盖层架构守卫）：实机加载 index.html，量全部「陆块结构 + 群系占比」指标，
  * 逐条对照 docs/v1-biome-globe-review.md 的目标值，并检查三条"不许退步"的回归红线
  * 与渲染架构的回归（draw call / 三角形 / Mesh 数）。
  *
@@ -65,6 +65,7 @@ const env = await evaluate(`(() => {
   if (!P) return { ok: false, why: '没有 __PLANET__' };
   if (P.CONFIG.landFraction === undefined) return { ok: false, why: 'CONFIG.landFraction 缺失' };
   if (P.CONFIG.elevationCenter !== undefined) return { ok: false, why: 'CONFIG.elevationCenter 仍在' };
+  if (P.CONFIG.riverWidth !== undefined) return { ok: false, why: 'CONFIG.riverWidth 仍在（H1 应已删除）' };
   return { ok: true, level: P.CONFIG.level, seed: P.CONFIG.seed, tiles: P.tiles.length };
 })()`);
 if (!env.ok) throw new Error(`页面状态不对：${env.why}（先关掉残留的 headless Chrome）`);
@@ -107,7 +108,10 @@ const S = await evaluate(`(() => {
     land++; elevs.length;
     if (t.elevation > MTN_LV) mtnSnow++;
     if (t.moisture === 0) zeroLand++;
-    if (!(t.elevation > MTN_LV || t.temperature < C.tempIce || t.river
+    // 「参与湿度分类的陆地」= 既不是高山雪峰，也不是冰原/苔原/针叶林
+    // ★ H1：河流已不再是群系，不再列入排除项（所以这个比例会比地形地基时高一点，
+    //         那些格子现在按自己的气候群系参与分类）
+    if (!(t.elevation > MTN_LV || t.temperature < C.tempIce
           || t.temperature < C.tempTundra || t.temperature < C.tempTaiga)) clsLand++;
     for (const j of adj[t.index]) if (tiles[j].elevation <= SEA) coastEdges++;
   }
@@ -201,10 +205,20 @@ const S = await evaluate(`(() => {
     biomeOfLand: {
       forest: ofLand('forest'), rainforest: ofLand('rainforest'), taiga: ofLand('taiga'),
       tundra: ofLand('tundra'), ice: ofLand('ice'), mountain: ofLand('mountain'),
-      snow: ofLand('snow'), river: ofLand('river'), desert: ofLand('desert'), grassland: ofLand('grassland'),
+      snow: ofLand('snow'), desert: ofLand('desert'), grassland: ofLand('grassland'),
     },
     biomeOfSea: { ocean: ofSea('ocean'), seaIce: ofSea('seaIce') },
     kinds: Object.keys(bio).length,
+    // H1 覆盖层架构：河流必须已从「群系」移出，且覆盖层 API 就位
+    h1: {
+      riverBiomePresent: Object.values(P.BIOME).includes('river'),
+      riverTiles: bio.river || 0,
+      riverFieldLeft: tiles.some((t) => t.river !== undefined),
+      hydroShell: 'hydro' in P.world,
+      overlaysAPI: typeof P.setVisibleOverlays === 'function',
+      selfTestChecks: P.selfTest ? P.selfTest.rows.length : 0,
+      selfTestFailed: P.selfTest ? P.selfTest.rows.filter((r) => !r.ok).map((r) => r.name) : ['selfTest 缺失'],
+    },
     latProfile,
     elevationQuantiles: { p05: round(pct(elevs, 0.05)), p50: round(pct(elevs, 0.5)), p62: round(pct(elevs, 0.62), 4), p95: round(pct(elevs, 0.95)), max: round(Math.max(...elevs)) },
     regression: { tempMonoOK, rainforestHighLat, rainforestLatP95: round(pct(rfLat, 0.95)), iceLowLat, snowLowLat, rfAdjIce },
@@ -223,7 +237,13 @@ const checks = [
   ['M4 草原占陆地 ≥ 12%',            S.M4_grasslandPctOfLand >= 12,                        `${S.M4_grasslandPctOfLand}%`],
   ['M5 沙漠占陆地 ∈ [8, 18]%',        S.M5_desertPctOfLand >= 8 && S.M5_desertPctOfLand <= 18, `${S.M5_desertPctOfLand}%`],
   ['陆块数 ≥ 3 块（含 ≥1% 陆地的）',   S.landBlocksOver1Pct >= 3,                            `${S.landBlocksOver1Pct} 块（总 ${S.landBlocks} 块）`],
-  ['群系种类 ≥ 12',                  S.kinds >= 12,                                        `${S.kinds} 种`],
+  ['群系种类 ≥ 11（河流已移出群系）',   S.kinds >= 11,                                        `${S.kinds} 种（M19 目标 ≥15，待后续阶段补真群系）`],
+  ['H1 群系表中已无河流',             !S.h1.riverBiomePresent && S.h1.riverTiles === 0 && !S.h1.riverFieldLeft,
+    `BIOME=${S.h1.riverBiomePresent ? '仍有 river' : '无'} 河网格子=${S.h1.riverTiles} 残留字段=${S.h1.riverFieldLeft}`],
+  ['H1 world.hydro 空壳 + 覆盖层 API 就位', S.h1.hydroShell && S.h1.overlaysAPI,
+    `hydro=${S.h1.hydroShell} setVisibleOverlays=${S.h1.overlaysAPI}`],
+  ['页面自测（runSelfTest）全部通过', S.h1.selfTestFailed.length === 0 && S.h1.selfTestChecks >= 15,
+    `${S.h1.selfTestChecks} 条${S.h1.selfTestFailed.length ? '，失败：' + S.h1.selfTestFailed.join('、') : '，无失败项'}`],
   ['M25 draw call ≤ 20',             S.render.drawCalls <= 20,                             `${S.render.drawCalls} 次/帧`],
   ['M25 只有 1 个 Mesh',             S.render.meshCount === 1,                             `${S.render.meshCount} 个`],
   ['M26 纬度-温度单调性',             S.regression.tempMonoOK,                              'top→赤道 逐桶不上升'],
@@ -248,7 +268,7 @@ console.log(`陆地 ${S.M1_landPct}% · 陆块 ${S.landBlocks} 块（≥1% 的 $
   `单格孤岛 ${S.M3_singleTileIslands} · 最大海洋占海洋 ${S.largestOceanPctOfOcean}%`);
 console.log(`占陆地%：草原 ${S.M4_grasslandPctOfLand} 沙漠 ${S.M5_desertPctOfLand} 森林 ${S.biomeOfLand.forest} ` +
   `雨林 ${S.biomeOfLand.rainforest} 针叶林 ${S.biomeOfLand.taiga} 苔原 ${S.biomeOfLand.tundra} ` +
-  `冰原 ${S.biomeOfLand.ice} 山脉 ${S.biomeOfLand.mountain} 雪峰 ${S.biomeOfLand.snow} 河流 ${S.biomeOfLand.river}`);
+  `冰原 ${S.biomeOfLand.ice} 山脉 ${S.biomeOfLand.mountain} 雪峰 ${S.biomeOfLand.snow}`);
 console.log(`山脉+雪峰占陆地 ${S.mtnSnowPctOfLand}%（阶段 D 的目标是 ≤12%）· 参与湿度分类的陆地 ${S.clsLandPctOfLand}% · 海岸碎度 ${S.coastRoughness}`);
 console.log(`指标已写入 ${path.relative(ROOT, path.join(OUT, 'terrain-stats.json'))}`);
 
@@ -262,6 +282,23 @@ for (const a of [0, 90, 180, 270]) {
   fs.writeFileSync(path.join(OUT, `terrain-${String(a).padStart(3, '0')}.png`), Buffer.from(s.data, 'base64'));
 }
 console.log(`截图 → ${path.relative(ROOT, OUT)}\\terrain-{0,90,180,270}.png`);
+
+/* ---------- UI 证据：图例分两组（气候群系 / 覆盖层）+ HUD「水系」占位 ---------- */
+await evaluate(`(() => { for (const id of ['hud','legend','hint']) { const e = document.getElementById(id); if (e) e.style.display = ''; } return 1; })()`);
+await evaluate(`(() => { const G = window.__PLANET__.planetGroup; G.rotation.x = 0; G.rotation.y = 0; return 1; })()`);
+const hovered = await evaluate(`(() => {
+  const P = window.__PLANET__;
+  let best = -1;
+  for (const t of P.tiles) if (t.elevation > P.CONFIG.seaLevel && t.center.z > 0.9) { best = t.index; break; }
+  P.setHovered(best);       // HUD 只在悬停/选中时可见，这里强制悬停一格
+  return { best, hydro: P.hydro(), overlays: P.overlays() };
+})()`);
+await sleep(1100);
+const uiShot = await send('Page.captureScreenshot', { format: 'png' });
+fs.writeFileSync(path.join(OUT, 'terrain-ui.png'), Buffer.from(uiShot.data, 'base64'));
+await evaluate(`window.__PLANET__.setHovered(-1)`);       // 恢复，避免影响后续调用
+console.log(`UI 证据（图例两组 + HUD「水系」占位）→ ${path.relative(ROOT, path.join(OUT, 'terrain-ui.png'))}`);
+console.log(`  H1 状态：hydro=${JSON.stringify(hovered.hydro)} overlays=${JSON.stringify(hovered.overlays)} 悬停图块 #${hovered.best}`);
 
 ws.close(); child.kill(); await sleep(400);
 try { fs.rmSync(profile, { recursive: true, force: true }); } catch { }

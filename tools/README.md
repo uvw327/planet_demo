@@ -47,7 +47,7 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 ```js
 window.__PLANET__ = {
   /* 业务数据层（纯 JS，渲染层不感知） */
-  tiles, world,                       // world = { ore, oreAmount, owner }
+  tiles, world,                       // world = { ore, oreAmount, owner, hydro }
   /* 渲染层句柄 */
   scene, camera, renderer, controls, planetGroup, gfx,
   /* 渲染 → 业务的映射表 */
@@ -56,28 +56,35 @@ window.__PLANET__ = {
   pickTile, select, setHovered, getSelected, getHovered,
   /* 矿石（演示"加资源不增加 draw call"） */
   setOre, clearOres,
+  /* 覆盖层（★ H1 起与「气候群系」分层，见 docs/river-system-design.md §3.2） */
+  hydro,                              // () => world.hydro，H1 为 null，H2 起有水文数据
+  setVisibleOverlays, overlays,       // (['river']) / (['ore']) / (null = 全部恢复)
   /* 顶点色 */
   repaintTile, repaintAll, setVisibleBiomes,
   /* 调参 */
-  refresh,                            // 重跑整条地形链「海拔 → 河流 → 气候 → 群系 → 顶点色」，返回新的群系计数
+  refresh,                            // 重跑整条地形链「海拔 → 气候 → 群系 → 顶点色」，返回新的群系计数
   stats,                              // draw call / 三角形 / 几何体数 / Mesh 数
 };
 ```
 
-因为地形 / 河流 / 气候 / 分类都是纯函数（只依赖 `CONFIG` 与图块数据），所以改完 `CONFIG` 直接调
+因为地形 / 气候 / 分类都是纯函数（只依赖 `CONFIG` 与图块数据），所以改完 `CONFIG` 直接调
 `__PLANET__.refresh()` 就能看到新结果，**不必重建几何体、也不必重载页面**。
 调参时每次重载约 1 分钟，这个出口能省掉绝大部分等待。对正常浏览无任何影响。
 
-⚠️ **`refresh()` 现在包含海拔**（地形地基之后）。改前它只重跑"河流 → 气候 → 群系"，
+⚠️ **`refresh()` 现在包含海拔**（地形地基之后）。改前它只重跑"气候 → 群系"，
 所以"改 `landFraction` 再 `refresh()`"根本不会生效。现在它调 `recomputeTerrain()`，
 与 `init()` **共用同一份实现**。之所以能这么放心地重算海拔，是因为默认
 `enableHeightOffset === false` 时**海拔不参与顶点坐标**（球面恒为半径 1），
 所以换地形参数不需要重建几何体 —— 这正是 `lab-terrain.mjs` 能在一次加载里扫几十组的原因。
+（例外：H3 的河网是**独立几何体**，改水文参数必须重建它，见设计书 §10.3。）
 
 ⚠️ 重构后整颗星球只有 **1 个 Mesh**，所以**不能再逐格切 `visible`**（旧的 `t.mesh.visible = …`
 写法会直接报错）。要做"只留某几个群系"的对比截图，改用
 `__PLANET__.setVisibleBiomes(['desert','grassland'])`（传 `null` 恢复全部）——
 它靠改顶点色实现，draw call 仍是 1。
+
+⚠️ **`river` 已不是一个群系**（H1 起改为「覆盖层」）。`BIOME.RIVER` / `CONFIG.riverWidth` /
+`tile.river` 都已删除；按群系筛河流的写法会静默筛掉一切。水文要看 `__PLANET__.hydro()`。
 
 `archive/v1-biome-globe.html`（v1 基线快照）**没有**这个出口，所以 `shot-v1.mjs` 只能用
 `Array.prototype.push` 钩子从 `Mesh.userData.tile` 反向取图块，并靠对象去重

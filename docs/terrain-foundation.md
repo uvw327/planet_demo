@@ -100,19 +100,18 @@ elevation > seaLevel  ⇔  z > zAtSea  ⇔  恰好 landFraction 比例的图块
 > 这是有意的取舍 —— 真实海岸线是分形的，但"分形"必须停在地图能表达的最小尺度之上，
 > 再往下就是采样噪声了。若你想更"碎"一点，把 `detailOctaves` 调到 3 即可（孤岛会回到约 10 个）。
 
-### 2.3 `recomputeTerrain()`：把"海拔 → 河流 → 气候 → 群系"收成一条链
+### 2.3 `recomputeTerrain()`：把"海拔 → 气候 → 群系"收成一条链
 
-改前这条链写在 `init()` 里，而 `__PLANET__.refresh()` 只重跑"河流 → 气候 → 群系"
+改前这条链写在 `init()` 里，而 `__PLANET__.refresh()` 只重跑"气候 → 群系"
 （**不含海拔**）。于是"改 `landFraction` 再 refresh"根本不会生效 —— 调参实验室会量到一堆假数据。
 
-现在：
+现在（**已含 H1**：河流移出群系，链上不再有 `tile.river`）：
 
 ```js
 function recomputeTerrain() {          // 纯计算，不碰渲染层
   computeElevations(tiles);
   for (const tile of tiles) {
     tile.latitude = tile.center.y;
-    tile.river    = isRiver(tile.center, tile.elevation);
     computeClimate(tile);
     tile.biome    = classifyBiome(tile);
   }
@@ -194,6 +193,12 @@ node tools/verify-terrain.mjs        # 17 条断言 + 4 张截图 + docs/terrain
 - 占陆地%：草原 19.2 · 沙漠 15.27 · 森林 9.2 · 雨林 8.12 · 针叶林 8.64 · 苔原 3.91 ·
   冰原 1.0 · 山脉 15.86 · 雪峰 8.3 · 河流 10.51。
 
+> ⚠️ **H1（覆盖层架构）之后这几个数字又变了一次**（河流不再是群系，409 个原河网格子露出气候群系色）：
+> 草原 22.05 · 沙漠 17.66 · 森林 11.1 · 雨林 9.92 · 针叶林 9.69 · 苔原 4.42 · 冰原 1.0 ·
+> 山脉 15.86 · 雪峰 8.3 · **河流 —（已移出群系）**，群系种类 12 → 11。
+> 本次（地形地基）的结论不受影响：M1/M2/M3 与所有红线都纹丝不动。
+> 当前值请看 `docs/terrain-shots/terrain-stats.json` 与评审文档 §8「H1 覆盖层架构」。
+
 ---
 
 ## 5. 数据再基线（重要）
@@ -222,11 +227,13 @@ node tools/verify-terrain.mjs        # 17 条断言 + 4 张截图 + docs/terrain
 
 ## 6. 取舍与已知代价（如实记录）
 
-1. **河流看起来更密了**：占陆地从 7.30% 涨到 **10.51%**。
+1. ~~**河流看起来更密了**：占陆地从 7.30% 涨到 **10.51%**。
    原因：`isRiver()` 用的是"噪声零值线"，而现在更多陆地落在低海拔（海平面刚往上那一段），
    正是河流噪声最容易过线的区间。**这不是新 bug，是 P0-2 的老问题被放大了一点**
    （v1 的河网本来就是蛛网/散点）。阶段 B 会把 `isRiver()` 整个换掉。
-   若你现在就想让它安静点，把 `CONFIG.riverWidth` 从 0.13 调到 0.09 即可（一行、可回滚）。
+   若你现在就想让它安静点，把 `CONFIG.riverWidth` 从 0.13 调到 0.09 即可（一行、可回滚）。~~
+   **→ 已由 H1 处理**：`isRiver()` 与 `CONFIG.riverWidth` 在 H1 中一并删除，旧河网整个消失，
+   这条代价随之作废（新河网由 H2/H3 用重力重建，见 `docs/river-system-design.md`）。
 2. **冰原从占陆地 2.94% 掉到 1.0%**：因为陆地现在是海拔分布**顶部**的 38%，
    极地陆地里超过 `MOUNTAIN_LEVEL` 的比例变高，于是被归到"山脉/雪峰"而不是"冰原"。
    极冠的白色观感由海冰（占海洋 10%）+ 雪峰承担，所以视觉上并不缺冰。

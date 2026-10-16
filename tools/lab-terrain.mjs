@@ -2,7 +2,7 @@
  * 地形地基实验室：加载 index.html 一次，然后在页面内扫 `landFraction × continentScale`
  * 等组合，输出「海陆比 / 陆块结构 / 群系占比」对比表。
  *
- * 为什么需要它：`recomputeTerrain()` 只管「海拔 → 河流 → 气候 → 群系」这条纯计算链，
+ * 为什么需要它：`recomputeTerrain()` 只管「海拔 → 气候 → 群系」这条纯计算链，
  * 而默认 `enableHeightOffset === false` 时海拔不参与顶点坐标（球面恒为半径 1），
  * 所以改 CONFIG 后调 `__PLANET__.refresh()` 就能看到新星球 —— 一次页面加载可扫几十组。
  * 换页面重载一次要十几秒，这个出口省掉绝大部分等待。
@@ -167,8 +167,9 @@ const RAW = await evaluate(`(() => {
       if (t.elevation <= SEA) continue;
       land++;
       if (t.elevation > MTN_LV) mtnSnow++;
-      // 「参与湿度分类的陆地」= 既不是高山雪峰，也不是冰原/河流/苔原/针叶林
-      if (!(t.elevation > MTN_LV || t.temperature < C.tempIce || t.river
+      // 「参与湿度分类的陆地」= 既不是高山雪峰，也不是冰原/苔原/针叶林
+      // ★ H1：河流已不再是群系，不再列入排除项
+      if (!(t.elevation > MTN_LV || t.temperature < C.tempIce
             || t.temperature < C.tempTundra || t.temperature < C.tempTaiga)) clsLand++;
     }
 
@@ -201,7 +202,7 @@ const RAW = await evaluate(`(() => {
       biomeOfLand: {
         desert: ofLand('desert'), grassland: ofLand('grassland'), forest: ofLand('forest'),
         rainforest: ofLand('rainforest'), taiga: ofLand('taiga'), tundra: ofLand('tundra'),
-        ice: ofLand('ice'), mountain: ofLand('mountain'), snow: ofLand('snow'), river: ofLand('river'),
+        ice: ofLand('ice'), mountain: ofLand('mountain'), snow: ofLand('snow'),
       },
       kinds: Object.keys(bio).length,
     });

@@ -56,6 +56,8 @@ const ANALYZE = `(() => {
     const r = buckets[bl];
     r.n++; r.s += t.moisture; r.s2 += t.moisture * t.moisture;
     if (t.moisture === 0) { r.zero++; zeroLand++; }
+    // 注意（H1 之后）：河流已不再是群系，t.river 恒为 undefined —— 这一项现在恒为 false，
+    // 保留只是为了不改动这份"阶段 A 历史脚本"的判定语义。当前口径请看 verify-terrain.mjs。
     const blocked = t.elevation > MTN_LV || t.temperature < C.tempIce || t.river
                  || t.temperature < C.tempTundra || t.temperature < C.tempTaiga;
     if (!blocked) cls.push(t.moisture);

@@ -56,6 +56,14 @@
     width: 11px; height: 11px; border-radius: 2px;
     box-shadow: inset 0 0 0 1px rgba(255,255,255,.14);
   }
+  /* 分组标题：把「气候群系」与「覆盖层」在视觉上分开 */
+  #legend .group {
+    margin: 8px 0 1px;
+    color: #6b87a6;
+    font-size: 11px;
+    letter-spacing: .06em;
+  }
+  #legend .group:first-child { margin-top: 0; }
 
   /* ---------- 左下角操作提示 ---------- */
   #hint {
@@ -88,6 +96,7 @@
   <div class="row"><span class="k">海&nbsp;&nbsp;&nbsp;&nbsp;拔</span><span class="v" id="hud-elev">-</span></div>
   <div class="row"><span class="k">纬&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lat">-</span></div>
   <div class="row"><span class="k">经&nbsp;&nbsp;&nbsp;&nbsp;度</span><span class="v" id="hud-lon">-</span></div>
+  <div class="row"><span class="k">水&nbsp;&nbsp;&nbsp;&nbsp;系</span><span class="v" id="hud-hydro">-</span></div>
   <div class="row"><span class="k">图&nbsp;&nbsp;&nbsp;&nbsp;块</span><span class="v" id="hud-id">-</span></div>
   <div class="row"><span class="k">状&nbsp;&nbsp;&nbsp;&nbsp;态</span><span class="v" id="hud-state">-</span></div>
 </div>
@@ -134,11 +143,12 @@ const CONFIG = {
   seed: 20261016,      // 噪声种子：换一个数字就是另一颗星球（结果可复现）
 
   // level 决定球面精细度，图块数 = 10·4^level + 2。实测（纯算法耗时，不含 WebGL 上传）：
-  //   level 3 →   642 图块 /  3840 三角形 /  生成 ~6 ms   /  642  draw call
-  //   level 4 →  2562 图块 / 15360 三角形 /  生成 ~16 ms  / 2562  draw call   ← 精细度与性能的平衡点
-  //   level 5 → 10242 图块 / 61440 三角形 /  生成 ~65 ms  / 10242 draw call
-  // 注意：level 5 的瓶颈不在生成耗时，而在「每个图块一个 Mesh」带来的上万次 draw call，
-  //       浏览器端会明显掉帧。若要上 level 5，需改为「单一 BufferGeometry + 顶点色」的架构。
+  //   level 3 →   642 图块 /  3840 三角形 /  生成 ~6 ms
+  //   level 4 →  2562 图块 / 15360 三角形 /  生成 ~16 ms
+  //   level 5 → 10242 图块 / 61440 三角形 /  生成 ~65 ms   ← 现选值
+  // 渲染架构（渲染重构后）：所有图块合并成 1 个 BufferGeometry + 顶点色（见 §7），
+  //   draw call 与图块数**无关**（星球恒 1 次；星空 / 描边 / 矿石各自 +1），
+  //   所以 level 只受「生成耗时」约束 —— 这正是敢上 level 5 的前提。
   level: 5,
 
   /* --- 生物群系判定阈值 --- */
@@ -170,11 +180,14 @@ const CONFIG = {
   // ★ 阶段 A 重新标定：旧的 0.30 / 0.48 是按「旧湿度场」定的，而旧湿度场在副热带
   //   是从 0.005 直接跳到 0.375（10% 纬度内），阈值落在那段悬崖上，导致沙漠与森林直接相邻、
   //   草原只剩 1.39%。换成乘性湿度场后分布平滑了，阈值必须跟着重新落位。
-  //   新的两个阈值是按「参与湿度分类的陆地」（2288 格，约占陆地 35.6%）的湿度分位定的：
+  //   新的两个阈值是按「参与湿度分类的陆地」的湿度分位定的（阶段 A 当时的基线是 2288 格、
+  //   约占陆地 35.6%；**地形地基后分母变了，H1 后这一比例是 60.73%**，阈值本身未动）：
   //     沙漠   = 分位 ≤ p27   ≈ 0.25  → 约占陆地 10%
   //     草原   = 分位 p27~p63 ≈ 0.65  → 约占陆地 13%
   //     森林+雨林 = 分位 > p63        → 约占陆地 13%
   //   这样「沙漠 → 半干旱草原 → 森林」三段各占约三分之一，且彼此都有连续过渡。
+  //   （H1 验收实测：草原 22.05%、沙漠 17.66%、雨林 9.92% —— 阈值没动，占比变化来自
+  //     "河流不再是群系"与"海拔场换过"，见 docs/v1-biome-globe-review.md §8）
   moistureDesert: 0.25,   // 低于此值 → 沙漠
   moistureGrassland: 0.65,// 低于此值 → 草原，以上 → 森林
 
@@ -204,10 +217,11 @@ const CONFIG = {
   landFraction: 0.38,     // 目标陆地占比：0.38 约为地球的 1.3 倍，且能自然裂成数块大陆
   elevationSpread: 0.30,  // 海拔自海平面向上的展开幅度：越大 → 陆地越"高"、高山雪峰越多
 
-  /* --- 河流（脊线噪声）--- */
-  riverScale: 2.20,          // 河流噪声频率：越大 → 河网越密
-  riverWidth: 0.13,          // 河流判定阈值：越大 → 河越宽（实测影响约 4~5% 的图块）
-  riverMaxElevation: 0.62,   // 河流出现的海拔上限
+  /* --- 河流（水文）--- */
+  // ★ H1：河流已从「群系」改为「覆盖层」，旧的三个参数（riverScale / riverWidth /
+  //   riverMaxElevation）一并删除。旧实现是「另一路噪声的零值线」，判定出来的是
+  //   "填满整格"的蓝色图块，不是有流向的树枝状水系。
+  //   新的水文参数统一放进 CONFIG.hydro，在 H2 落地；见 docs/river-system-design.md §3、§7。
 
   /* --- 立体感 --- */
   // 本星球是「选择出生地」的俯视界面，不是可供 3D 角色行走的地形。
@@ -236,11 +250,18 @@ const CONFIG = {
  * §1  常量表与工具函数
  * ========================================================================= */
 
-/** 生物群系枚举 */
+/**
+ * 气候群系枚举（★ H1：河流已从这里移出）。
+ *
+ * 「河」不是气候决定的原生地表覆盖，而是**水文覆盖层**，与「山脉 / 雪线 / 湖泊」
+ * 同类：赤道有雪峰、沙漠里有湖、雨林里有山 —— 它和气候正交。
+ * 所以它不该占群系名额，也不该参与 classifyBiome 的判定优先级。
+ * 详见 docs/river-system-design.md §3「分层地表模型」。
+ * 空出的名额留给真正的群系（稀树草原 / 湿地 / 盐湖），服务 M19（≥15 种）。
+ */
 const BIOME = {
   OCEAN:      'ocean',       // 海洋
   SEA_ICE:    'seaIce',      // 极地海冰
-  RIVER:      'river',       // 河流
   DESERT:     'desert',      // 沙漠（炎热 + 干旱）
   GRASSLAND:  'grassland',   // 草原（半干旱）
   FOREST:     'forest',      // 温带森林
@@ -256,7 +277,6 @@ const BIOME = {
 const BIOME_COLOR = {
   [BIOME.OCEAN]:      0x1a3a6b,
   [BIOME.SEA_ICE]:    0xcfe2ee,
-  [BIOME.RIVER]:      0x3a9bd9,
   [BIOME.DESERT]:     0xe0c56e,
   [BIOME.GRASSLAND]:  0x9ab54f,
   [BIOME.FOREST]:     0x3d8c40,
@@ -272,7 +292,6 @@ const BIOME_COLOR = {
 const BIOME_LABEL = {
   [BIOME.OCEAN]:      '海洋',
   [BIOME.SEA_ICE]:    '海冰',
-  [BIOME.RIVER]:      '河流',
   [BIOME.DESERT]:     '沙漠',
   [BIOME.GRASSLAND]:  '草原',
   [BIOME.FOREST]:     '温带森林',
@@ -316,7 +335,11 @@ const noise = new SimplexNoise({ random: rng });
 // 五路互不相关的固定偏移，避免不同频率的噪声在原点附近产生关联
 const OFFSET_A = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 大陆
 const OFFSET_B = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 细节
-const OFFSET_C = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 河流
+// ⚠ 这五路偏移共用同一条 rng 序列，**删掉任何一路都会挪动后面几路的取值**。
+//   OFFSET_C 原本是「河流噪声」的偏移，H1 起河流已不再用它，但这一行必须留着占位：
+//   删掉会少消耗 3 次 rng() → OFFSET_D/E（温度、湿度扰动）改变 → 气候与群系全变，
+//   H1 就做不到"除河流外逐像素不变"。
+const OFFSET_C = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 已停用（占位）
 const OFFSET_D = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 温度扰动
 const OFFSET_E = new THREE.Vector3(rng() * 400, rng() * 400, rng() * 400);  // 湿度扰动
 
@@ -540,24 +563,12 @@ function computeElevations(tiles) {
   }
 }
 
-/**
- * 河流判定：用另一路噪声的「零值线」构造网状水系。
- * |noise| 越接近 0 的地方越可能是河道；河道随海拔升高而变窄。
+/*
+ * ★ H1：这里原本是 isRiver()（另一路噪声的「零值线」→ 判出来的是"填满整格"的蓝块）。
+ *   河流已改为「覆盖层」，判定交给 H2 的 computeHydrology()：
+ *   填平洼地 → 多流向(MFD)分配 → 汇水累积 → 阈值提取 → 湖/内流盆地。
+ *   见 docs/river-system-design.md §4。
  */
-function isRiver(center, elevation) {
-  if (elevation <= CONFIG.seaLevel + 0.02) return false;        // 海面附近不算河
-  if (elevation > CONFIG.riverMaxElevation) return false;       // 高山雪线以上不算河
-
-  const p = center.clone().multiplyScalar(CONFIG.riverScale);
-  const r = Math.abs(sampleNoise3D(
-    p.x + OFFSET_C.x, p.y + OFFSET_C.y, p.z + OFFSET_C.z,
-  ));
-
-  // t: 0 靠近海平面 → 1 接近高山；河道近海宽、源头窄
-  const t = (elevation - CONFIG.seaLevel) / (CONFIG.riverMaxElevation - CONFIG.seaLevel);
-  const width = CONFIG.riverWidth * (0.4 + 0.6 * (1 - t));
-  return r < width;
-}
 
 /**
  * 纬向基础湿度 —— 三圈环流模型（★ 阶段 A 改为「乘性脱湿」）。
@@ -632,21 +643,24 @@ function computeClimate(tile) {
 }
 
 /**
- * 生物群系分类。
+ * 气候群系分类（★ H1：不再包含河流）。
  *
  * 判定顺序即优先级：
- *     海洋/海冰 > 高山（雪峰、山脉）> 极地冰原 > 河流 > 温度带 > 湿度带
+ *     海洋/海冰 > 高山（雪峰、山脉）> 极地冰原 > 温度带 > 湿度带
  *
  * 说明：
  * - 高山单独处理，因为雪线与纬度无关（赤道上的乞力马扎罗同样有冰川）。
- * - 河流晚于冰原判定，因此不会在冰盖上出现河道。
+ *   注意：山脉/雪峰在语义上同属「覆盖层」（见 §3.3 的 L2），之所以还留在本函数里，
+ *   是因为阶段 D 会把它改造成真正的「成带山脉 + 温度雪线」；图例已先按语义分组。
  * - 温度带负责「冰原 / 苔原 / 针叶林 / 温带 / 热带」的南北分异，
  *   湿度带负责在温带与热带内部区分「沙漠 / 草原 / 森林」。
  *   两者缺一不可 —— 只靠温度做不出沙漠（赤道与副热带温度相近，
  *   差别全部来自降水）。
+ * - 河流已移出本函数：它是覆盖层，由 H2 的 computeHydrology() 单独判定，
+ *   渲染时也不再覆盖底层气候群系色（撒哈拉里的尼罗河，河床下就是沙漠黄）。
  */
 function classifyBiome(tile) {
-  const { elevation, latitude, river, temperature, moisture } = tile;
+  const { elevation, latitude, temperature, moisture } = tile;
   const absLat = Math.abs(latitude);
 
   // 1. 海洋：极地海面结冰
@@ -661,21 +675,18 @@ function classifyBiome(tile) {
   // 3. 极地冰盖
   if (temperature < CONFIG.tempIce) return BIOME.ICE;
 
-  // 4. 河流：陆地上各气候带都可能出现（包括穿越沙漠的过境河）
-  if (river) return BIOME.RIVER;
-
-  // 5. 温度带：由寒到暖
+  // 4. 温度带：由寒到暖
   if (temperature < CONFIG.tempTundra) return BIOME.TUNDRA;
   if (temperature < CONFIG.tempTaiga) return BIOME.TAIGA;
 
-  // 6. 温带 / 热带：在温度带内部再按湿度划分
+  // 5. 温带 / 热带：在温度带内部再按湿度划分
   if (moisture < CONFIG.moistureDesert) return BIOME.DESERT;
   if (moisture < CONFIG.moistureGrassland) return BIOME.GRASSLAND;
   return temperature > CONFIG.tempTropical ? BIOME.RAINFOREST : BIOME.FOREST;
 }
 
 /**
- * 重跑「海拔 → 河流 → 气候 → 群系」这条纯计算链（不碰渲染层）。
+ * 重跑「海拔 → 气候 → 群系」这条纯计算链（不碰渲染层）。
  *
  * 这条链只依赖 CONFIG 与图块的球面坐标，与渲染层完全解耦。而默认
  * `enableHeightOffset === false` 时海拔**不参与顶点坐标**（球面恒为半径 1），
@@ -684,12 +695,14 @@ function classifyBiome(tile) {
  *
  * 唯一与渲染层相关的字段是 `baseColor`，它由 `repaintAll()` 从 `biome` 重新派生，
  * 所以这里只负责把 `biome` 算对，颜色的事交给调用方。
+ *
+ * ★ H2 会在 computeClimate 之后插入 computeHydrology(tiles)（水文需要海拔+湿度+温度三者），
+ *   并在此处调用 computeRivers() 重建河网几何体 —— 见 docs/river-system-design.md §10.3。
  */
 function recomputeTerrain() {
   computeElevations(tiles);
   for (const tile of tiles) {
     tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
-    tile.river    = isRiver(tile.center, tile.elevation);
     computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
     tile.biome    = classifyBiome(tile);
   }
@@ -913,7 +926,7 @@ function createStarfield() {
 scene.add(createStarfield());
 
 /* =========================================================================
- * §7  交互：射线拾取、高亮、选中、矿石层、HUD
+ * §7  交互：射线拾取、高亮、选中、覆盖层显隐、矿石层、HUD
  * -------------------------------------------------------------------------
  * 三条设计约束（都来自移动端性能预算）：
  *   ① 拾取：一次 raycaster.intersectObject(唯一个 Mesh)，用 faceIndex 查表。
@@ -954,6 +967,37 @@ const world = {
   ore: null,         // Int8Array：0 = 无矿，>0 = 矿种 id
   oreAmount: null,   // Uint16Array：储量
   owner: null,       // Int16Array：归属，-1 = 无主
+
+  /**
+   * 水文层（★ H1 先立空壳，H2 由 computeHydrology() 填充）。
+   *
+   * 纯数据、一次性算完、运行时不重算，渲染层不感知。契约见
+   * docs/river-system-design.md §6.1：
+   *   adj      Int32Array[]   邻接表（公共设施：水文与将来所有相邻关系计算的公共输入）
+   *   filled   Float32Array   填平后的水面高程（≥ elevation）
+   *   depth    Float32Array   filled − elevation（= 湖深，正数即被淹格）
+   *   down     Int32Array     主下游（argmax 权重）；-1 = 入海 / 内流终点
+   *   accum    Float32Array   汇水量（按降水量加权，实数量纲）
+   *   isRiver  Uint8Array     1 = 该格有河道穿过
+   *   lakeId   Int32Array     -1 = 非湖；否则湖泊编号
+   *   lakes    []             湖泊属性表 { id, area, depth, level, isEndorheic, ... }
+   */
+  hydro: null,
+};
+
+/**
+ * 覆盖层显隐状态（★ H1 引入）。
+ *
+ * 「覆盖层」= 与气候群系正交的地形/水文层。实现规则只有一条
+ * （见 docs/river-system-design.md §3.2）：
+ *   「面」类（湖面 / 山带 / 雪线）→ 直接改底层顶点色 → 0 draw call
+ *   「线」类（河流 / 将来可选的山脊线、等深线）→ 独立几何体 → 一层各 1 次
+ * 这里只存"用户想不想看"，各层自己去读；因此加一层不改这个结构。
+ */
+const overlayVisible = {
+  ore: true,     // 矿石符号层（已实现，InstancedMesh）
+  river: true,   // 河网层（H3 实现）
+  lake: true,    // 湖泊覆盖（H4 实现，走顶点色而非独立层）
 };
 
 const raycaster = new THREE.Raycaster();
@@ -969,6 +1013,7 @@ const hudMoist = document.getElementById('hud-moist');
 const hudElev = document.getElementById('hud-elev');
 const hudLat = document.getElementById('hud-lat');
 const hudLon = document.getElementById('hud-lon');
+const hudHydro = document.getElementById('hud-hydro');
 const hudId = document.getElementById('hud-id');
 const hudState = document.getElementById('hud-state');
 
@@ -983,6 +1028,9 @@ function updateHud(tile) {
   hudElev.textContent = tile.elevation.toFixed(3);
   hudLat.textContent = `${latDeg >= 0 ? 'N' : 'S'} ${Math.abs(latDeg).toFixed(1)}°`;
   hudLon.textContent = `${lonDeg >= 0 ? 'E' : 'W'} ${Math.abs(lonDeg).toFixed(1)}°`;
+  // 水系（★ H1 占位）：水文数据层在 H2 由 computeHydrology() 填进 world.hydro，
+  // 之后这里显示「汇水量 / 是否河道 / 河源 / 河口 / 湖泊 / 内流盆地」。
+  hudHydro.textContent = '—';
   hudId.textContent = `#${tile.index} · ${tile.vertexIndices.length} 边形`;
 }
 
@@ -1236,7 +1284,28 @@ function syncOreLayer() {
   inst.count = n;
   inst.instanceMatrix.needsUpdate = true;
   if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
-  inst.visible = n > 0;   // 没有矿时彻底不绘制（连 1 次 draw call 都不花）
+  inst.visible = n > 0 && overlayVisible.ore;   // 没矿 / 被覆盖层开关关掉时彻底不绘制（连 1 次 draw call 都不花）
+}
+
+/**
+ * 覆盖层显隐（与 setVisibleBiomes 并列，见 docs/river-system-design.md §6.3）。
+ *
+ *   setVisibleOverlays(['river'])   → 只保留河网层
+ *   setVisibleOverlays(['ore'])     → 只保留矿石符号层
+ *   setVisibleOverlays(null / [])   → 全部恢复
+ *
+ * 与 setVisibleBiomes 的差别：群系筛选靠改顶点色（0 成本），覆盖层各自按
+ * 「面走顶点色 / 线走独立几何体」实现，所以这里只是把开关状态记下来，
+ * 由各层自己去读（例如 syncOreLayer 读 overlayVisible.ore）。
+ *
+ * ★ H1 现状：只有 'ore' 是真实存在的层；'river'（H3）、'lake'（H4）会先记住状态，
+ *   图层实现后立即生效 —— 现在调用它们不报错，也不会有任何视觉变化。
+ */
+function setVisibleOverlays(list) {
+  const keep = list && list.length ? new Set(list) : null;
+  for (const key of Object.keys(overlayVisible)) overlayVisible[key] = !keep || keep.has(key);
+  if (gfx.oreLayer) gfx.oreLayer.visible = overlayVisible.ore && gfx.oreLayer.count > 0;
+  return { ...overlayVisible };
 }
 
 /* -------------------------------------------------------------------------
@@ -1315,19 +1384,34 @@ window.addEventListener('resize', onResize);
 /* =========================================================================
  * §9  图例
  * ========================================================================= */
+/**
+ * 图例（★ H1 起分两组）。
+ *
+ * 分组不是装饰，而是「分层地表模型」在 UI 上的体现（见 river-system-design.md §3.1）：
+ *   - 气候群系：温度 + 湿度决定的原生地表覆盖 → 逐格顶点色
+ *   - 覆盖层  ：海拔 + 水决定的、与气候正交的地形水文 → 面走顶点色 / 线走独立几何体
+ * 山脉与雪峰当前仍由 classifyBiome() 产出（阶段 D 会把它改造成真正的覆盖层），
+ * 但语义上属于覆盖层，所以先放进右边那一组。空组不渲染，避免出现光头标题。
+ */
 function buildLegend() {
   const el = document.getElementById('legend');
-  // 按气候带由冷到热排列，便于对照
-  const order = [
-    BIOME.OCEAN, BIOME.SEA_ICE, BIOME.RIVER,
-    BIOME.ICE, BIOME.TUNDRA, BIOME.TAIGA,
-    BIOME.FOREST, BIOME.RAINFOREST, BIOME.GRASSLAND,
-    BIOME.DESERT, BIOME.MOUNTAIN, BIOME.SNOW,
+  const groups = [
+    { title: '气候群系', biomes: [
+      BIOME.OCEAN, BIOME.SEA_ICE, BIOME.ICE, BIOME.TUNDRA, BIOME.TAIGA,
+      BIOME.FOREST, BIOME.RAINFOREST, BIOME.GRASSLAND, BIOME.DESERT,
+    ] },
+    { title: '覆盖层', biomes: [
+      BIOME.MOUNTAIN, BIOME.SNOW,
+      /* H3/H4 起：河流 / 湖泊 / 内流盆地 / 盐湖 */
+    ] },
   ];
-  el.innerHTML = order.map((b) => {
-    const hex = '#' + BIOME_COLOR[b].toString(16).padStart(6, '0');
-    return `<div class="item"><span class="swatch" style="background:${hex}"></span>${BIOME_LABEL[b]}</div>`;
-  }).join('');
+  el.innerHTML = groups.filter((g) => g.biomes.length).map((g) =>
+    `<div class="group">${g.title}</div>` +
+    g.biomes.map((b) => {
+      const hex = '#' + BIOME_COLOR[b].toString(16).padStart(6, '0');
+      return `<div class="item"><span class="swatch" style="background:${hex}"></span>${BIOME_LABEL[b]}</div>`;
+    }).join(''),
+  ).join('');
 }
 
 /* =========================================================================
@@ -1410,6 +1494,13 @@ function runSelfTest(tiles) {
     check('场景中星球主体仅 1 个 Mesh', meshCount === 1, `实际 ${meshCount} 个 Mesh`);
   }
 
+  // ---- 分层地表模型（★ H1）：河流必须是「覆盖层」，不再是一个群系 ----
+  check('群系表中已无河流（河流属覆盖层）',
+    !Object.values(BIOME).includes('river') && !('river' in BIOME_COLOR) && !('river' in BIOME_LABEL));
+  check('图块上无残留的 river 字段', tiles.every((t) => t.river === undefined));
+  check('world.hydro 空壳 + 覆盖层显隐 API 已就位',
+    'hydro' in world && typeof setVisibleOverlays === 'function' && 'river' in overlayVisible);
+
   // 生物群系统计
   const stats = {};
   for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
@@ -1451,7 +1542,8 @@ function init() {
   tiles = dual.polygons;
   tiles.forEach((tile, i) => { tile.index = i; });
 
-  // --- 2. 生成地形数据（海拔 → 河流 → 气候 → 群系，纯计算，不碰渲染）---
+  // --- 2. 生成地形数据（海拔 → 气候 → 群系，纯计算，不碰渲染）---
+  //     H2 会在气候之后接上水文（海拔 + 湿度 + 温度 三者齐备才能算产流与填平）。
   recomputeTerrain();
 
   // --- 3. 计算渲染坐标 ---
@@ -1514,7 +1606,9 @@ function init() {
   setupInteraction();
   buildLegend();
 
-  if (CONFIG.debugAssert) runSelfTest(tiles);
+  // 自测结果留一份给验收脚本读（tools/verify-terrain.mjs 会断言"无失败项"），
+  // 否则页面自测只能靠人眼看控制台，机器验不到。
+  const selfTest = CONFIG.debugAssert ? runSelfTest(tiles) : null;
 
   animate();
 
@@ -1536,7 +1630,7 @@ function init() {
   console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
 
   // --- 7. 调参 / 集成出口 ---
-  // 河流 / 气候 / 分类都是纯函数（只依赖 CONFIG 与图块数据），所以改完 CONFIG 直接调
+  // 气候 / 分类都是纯函数（只依赖 CONFIG 与图块数据），所以改完 CONFIG 直接调
   // __PLANET__.refresh() 就能看到新结果，不必重建几何体、也不必重载页面。
   // 调参时每次重载页面要十几秒，这个出口能省掉绝大部分等待。
   window.__PLANET__ = {
@@ -1566,6 +1660,13 @@ function init() {
     /* 矿石层（演示"加资源不增加 draw call"的套路） */
     setOre, clearOres,
 
+    /* 覆盖层（★ H1 起与「气候群系」分层；见 docs/river-system-design.md §3.2）
+       hydro()            —— 水文数据（H1 为 null，H2 起有值）
+       setVisibleOverlays —— ['river'] / ['ore'] / null（全部恢复） */
+    hydro: () => world.hydro,
+    setVisibleOverlays,
+    overlays: () => ({ ...overlayVisible }),
+
     /* 顶点色 */
     repaintTile, repaintAll,
 
@@ -1585,7 +1686,7 @@ function init() {
       return keep ? keep.size : 'all';
     },
 
-    /** 重跑整条地形链「海拔 → 河流 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
+    /** 重跑整条地形链「海拔 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
     refresh() {
       recomputeTerrain();
       const stats = {};
@@ -1596,6 +1697,9 @@ function init() {
       repaintAll();
       return stats;
     },
+
+    /* 自测结果（页面内跑的那 17 条；验收脚本断言"无失败项"，免得只能靠人眼看控制台） */
+    selfTest,
 
     /* 性能计数（验收用） */
     stats() {

@@ -136,6 +136,8 @@ const stats = await evaluate(`(() => {
   const cls = [];
   for (const t of tiles) {
     if (t.elevation <= SEA) continue;
+    // 注意（H1 之后）：河流已不再是群系，t.river 恒为 undefined —— 这一项恒为 false。
+    // 本脚本是"阶段 A 的历史验收脚本"，保留原判定语义不改；当前口径见 verify-terrain.mjs。
     if (t.elevation > MTN_LV || t.temperature < C.tempIce || t.river || t.temperature < C.tempTundra || t.temperature < C.tempTaiga) continue;
     cls.push(t.moisture);
   }

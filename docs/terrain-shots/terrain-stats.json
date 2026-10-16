@@ -16,8 +16,8 @@
   "landCount": 3891,
   "M2_largestLandPctOfLand": 48.1,
   "M3_singleTileIslands": 2,
-  "M4_grasslandPctOfLand": 19.2,
-  "M5_desertPctOfLand": 15.27,
+  "M4_grasslandPctOfLand": 22.05,
+  "M5_desertPctOfLand": 17.66,
   "landBlocks": 26,
   "landBlocksOver1Pct": 7,
   "landTop5Pct": [
@@ -31,7 +31,7 @@
   "oceanBlocks": 13,
   "largestOceanPctOfOcean": 98.5,
   "mtnSnowPctOfLand": 24.16,
-  "clsLandPctOfLand": 51.79,
+  "clsLandPctOfLand": 60.73,
   "stageA": {
     "zeroLandPct": 0,
     "subtropicLand": {
@@ -66,35 +66,42 @@
   },
   "biome": {
     "ocean": 5718,
-    "grassland": 747,
+    "grassland": 858,
     "mountain": 617,
-    "desert": 594,
-    "taiga": 336,
+    "desert": 687,
+    "taiga": 377,
     "seaIce": 633,
-    "river": 409,
+    "forest": 432,
     "snow": 323,
-    "forest": 358,
-    "tundra": 152,
+    "tundra": 172,
     "ice": 39,
-    "rainforest": 316
+    "rainforest": 386
   },
   "biomeOfLand": {
-    "forest": 9.2,
-    "rainforest": 8.12,
-    "taiga": 8.64,
-    "tundra": 3.91,
+    "forest": 11.1,
+    "rainforest": 9.92,
+    "taiga": 9.69,
+    "tundra": 4.42,
     "ice": 1,
     "mountain": 15.86,
     "snow": 8.3,
-    "river": 10.51,
-    "desert": 15.27,
-    "grassland": 19.2
+    "desert": 17.66,
+    "grassland": 22.05
   },
   "biomeOfSea": {
     "ocean": 90.03,
     "seaIce": 9.97
   },
-  "kinds": 12,
+  "kinds": 11,
+  "h1": {
+    "riverBiomePresent": false,
+    "riverTiles": 0,
+    "riverFieldLeft": false,
+    "hydroShell": true,
+    "overlaysAPI": true,
+    "selfTestChecks": 17,
+    "selfTestFailed": []
+  },
   "latProfile": [
     {
       "lat": "0.0",
@@ -197,7 +204,7 @@
   "regression": {
     "tempMonoOK": true,
     "rainforestHighLat": 0,
-    "rainforestLatP95": 0.208,
+    "rainforestLatP95": 0.201,
     "iceLowLat": 0,
     "snowLowLat": 102,
     "rfAdjIce": 0
