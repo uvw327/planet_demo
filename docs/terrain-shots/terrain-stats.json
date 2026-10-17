@@ -6,10 +6,10 @@
     "level": 6,
     "tiles": 40962,
     "triangles": 245760,
-    "terrainMs": 276,
-    "geometryMs": 50.1,
-    "totalMs": 347,
-    "riverMs": 20
+    "terrainMs": 350.6,
+    "geometryMs": 34.6,
+    "totalMs": 395,
+    "riverMs": 9.4
   },
   "params": {
     "landFraction": 0.38,
@@ -35,8 +35,8 @@
   "landCount": 15565,
   "M2_largestLandPctOfLand": 48.1,
   "M3_singleTileIslands": 2,
-  "M4_grasslandPctOfLand": 25.92,
-  "M5_desertPctOfLand": 22.39,
+  "M4_grasslandPctOfLand": 28.06,
+  "M5_desertPctOfLand": 19.31,
   "landBlocks": 27,
   "landBlocksOver1Pct": 7,
   "landTop5Pct": [
@@ -52,9 +52,9 @@
   "mtnSnowPctOfLand": 9.78,
   "clsLandPctOfLand": 72.74,
   "climateSplit": {
-    "desert": 30.78,
-    "grassland": 35.63,
-    "forest": 33.59
+    "desert": 26.55,
+    "grassland": 38.58,
+    "forest": 34.87
   },
   "orogeny": {
     "max": 0.994,
@@ -76,57 +76,57 @@
     "zeroLandPct": 0,
     "subtropicLand": {
       "n": 6741,
-      "mean": 0.2623,
-      "std": 0.1696,
+      "mean": 0.1208,
+      "std": 0.1475,
       "zeroPct": 0
     },
-    "maxBinPct": 19.8,
+    "maxBinPct": 23,
     "moistureHist": [
-      0.1,
-      4.9,
-      7.6,
-      7.1,
-      6.3,
-      5.7,
-      5.1,
-      5.2,
-      4.9,
-      4.1,
-      3.8,
-      3.8,
-      3.9,
-      3.6,
-      3.4,
-      2.9,
-      2.9,
-      2.7,
+      21.5,
+      23,
+      14,
+      8.3,
+      6.2,
+      5,
+      3.5,
+      3,
       2.5,
-      19.8
+      2,
+      1.9,
+      1.5,
+      1.3,
+      1.2,
+      0.9,
+      0.6,
+      0.7,
+      0.5,
+      0.4,
+      2.2
     ]
   },
   "biome": {
     "ocean": 22890,
-    "grassland": 4034,
-    "desert": 3485,
+    "desert": 3006,
+    "grassland": 4368,
     "taiga": 1956,
     "seaIce": 2507,
     "mountain": 620,
     "snow": 903,
-    "forest": 1891,
+    "forest": 3115,
     "tundra": 625,
-    "rainforest": 1912,
+    "rainforest": 833,
     "ice": 139
   },
   "biomeOfLand": {
-    "forest": 12.15,
-    "rainforest": 12.28,
+    "forest": 20.01,
+    "rainforest": 5.35,
     "taiga": 12.57,
     "tundra": 4.02,
     "ice": 0.89,
     "mountain": 3.98,
     "snow": 5.8,
-    "desert": 22.39,
-    "grassland": 25.92
+    "desert": 19.31,
+    "grassland": 28.06
   },
   "biomeOfSea": {
     "ocean": 90.13,
@@ -149,8 +149,8 @@
       "n": 4100,
       "landN": 1319,
       "temp": 0.957,
-      "moistLand": 0.949,
-      "moistStd": 0.1197,
+      "moistLand": 0.56,
+      "moistStd": 0.2528,
       "zeroPct": 0
     },
     {
@@ -158,8 +158,8 @@
       "n": 4188,
       "landN": 1706,
       "temp": 0.937,
-      "moistLand": 0.778,
-      "moistStd": 0.2224,
+      "moistLand": 0.388,
+      "moistStd": 0.2325,
       "zeroPct": 0
     },
     {
@@ -167,8 +167,8 @@
       "n": 4084,
       "landN": 2104,
       "temp": 0.894,
-      "moistLand": 0.421,
-      "moistStd": 0.1888,
+      "moistLand": 0.234,
+      "moistStd": 0.1879,
       "zeroPct": 0
     },
     {
@@ -176,8 +176,8 @@
       "n": 4116,
       "landN": 2269,
       "temp": 0.851,
-      "moistLand": 0.171,
-      "moistStd": 0.0859,
+      "moistLand": 0.137,
+      "moistStd": 0.1487,
       "zeroPct": 0
     },
     {
@@ -185,8 +185,8 @@
       "n": 4004,
       "landN": 2355,
       "temp": 0.806,
-      "moistLand": 0.227,
-      "moistStd": 0.1315,
+      "moistLand": 0.088,
+      "moistStd": 0.1319,
       "zeroPct": 0
     },
     {
@@ -194,8 +194,8 @@
       "n": 3988,
       "landN": 1943,
       "temp": 0.772,
-      "moistLand": 0.542,
-      "moistStd": 0.2314,
+      "moistLand": 0.083,
+      "moistStd": 0.1163,
       "zeroPct": 0
     },
     {
@@ -203,8 +203,8 @@
       "n": 4048,
       "landN": 1437,
       "temp": 0.719,
-      "moistLand": 0.775,
-      "moistStd": 0.2074,
+      "moistLand": 0.147,
+      "moistStd": 0.1646,
       "zeroPct": 0
     },
     {
@@ -212,8 +212,8 @@
       "n": 4208,
       "landN": 1001,
       "temp": 0.636,
-      "moistLand": 0.845,
-      "moistStd": 0.1918,
+      "moistLand": 0.221,
+      "moistStd": 0.1695,
       "zeroPct": 0
     },
     {
@@ -221,8 +221,8 @@
       "n": 4188,
       "landN": 861,
       "temp": 0.518,
-      "moistLand": 0.745,
-      "moistStd": 0.2132,
+      "moistLand": 0.173,
+      "moistStd": 0.1269,
       "zeroPct": 0
     },
     {
@@ -230,8 +230,8 @@
       "n": 4038,
       "landN": 570,
       "temp": 0.285,
-      "moistLand": 0.54,
-      "moistStd": 0.1702,
+      "moistLand": 0.073,
+      "moistStd": 0.068,
       "zeroPct": 0
     }
   ],
@@ -245,14 +245,14 @@
   "regression": {
     "tempMonoOK": true,
     "rainforestHighLat": 0,
-    "rainforestLatP95": 0.213,
+    "rainforestLatP95": 0.377,
     "iceLowLat": 0,
     "snowLowLat": 126,
     "rfAdjIce": 0
   },
   "render": {
     "drawCalls": 3,
-    "triangles": 260084,
+    "triangles": 257170,
     "meshCount": 2,
     "overlayMeshes": 1,
     "geometries": 3

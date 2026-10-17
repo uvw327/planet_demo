@@ -414,6 +414,24 @@ const S = await evaluate(`(() => {
       for (let i = 0; i < orders.length - 1; i++) {
         bifurcation.push(+(byOrder.get(orders[i]) / byOrder.get(orders[i + 1])).toFixed(2));
       }
+      /* ★ 同一批河格的**正统 Horton 河段口径**（对照）：
+         第 k 级河段 = 自身 order=k 且上游没有 order=k 邻居的节点（即一条无分叉链的起点）。
+         M31 用的格口径把"链长"混进了比值 —— 河网变碎、链变短时格口径会虚高；
+         Horton 1945 的 Rb 定义是段数比 n_k/n_{k+1}。两个口径一起报，用数据说话。 */
+      const segCount = new Map();
+      for (const x of cells) {
+        const k = order[x];
+        let sameUp = false;
+        for (const k2 of hy.adj[x]) {
+          if (isR[k2] && hy.down[k2] === x && order[k2] === k) { sameUp = true; break; }
+        }
+        if (!sameUp) segCount.set(k, (segCount.get(k) || 0) + 1);
+      }
+      const segOrders = [...segCount.keys()].sort((a, b) => a - b);
+      const rbSeg = [];
+      for (let i = 0; i < segOrders.length - 1; i++) {
+        rbSeg.push(+(segCount.get(segOrders[i]) / segCount.get(segOrders[i + 1])).toFixed(2));
+      }
 
       return {
         vertexCount: rs.vertexCount, triCount: rs.triCount, chains: rs.chains,
@@ -425,6 +443,7 @@ const S = await evaluate(`(() => {
         gridStraightPct: rs.gridStraightPct,
         spearman: +rho.toFixed(4), widthDips, maxWidthDipRel: +maxWidthDipRel.toFixed(4),
         strahlerOrders: orders, strahlerCounts: orders.map((o) => byOrder.get(o)), bifurcation,
+        segCounts: segOrders.map((o) => segCount.get(o)), rbSeg,
       };
     })(),
     lakes: {
@@ -444,6 +463,68 @@ const S = await evaluate(`(() => {
       wetTotal: lakeAreas.reduce((a, b) => a + b, 0),
     },
     depthHist: { bins, counts: depthHist },
+    /* --- ★ C 诊断：河网阈值扫描（河格 = 陆地且 accum/unit ≥ T）---
+       P0-2（汇水中位数 ≥20）与 M31（分叉比 ∈[3,5]）在 T=12 下失守，先离线重算
+       一组 T，看"按新湿度场重标阈值"能不能同时救回两条 —— 这与群系阈值按分位
+       重标（moistureDesert/Grassland）是同一套方法论，不改验收、只改参数。 */
+    thresholdScan: (() => {
+      const seaL = seaLevel;
+      const out = [];
+      for (const T of [12, 14, 16, 18, 20, 24]) {
+        const r = new Uint8Array(n);
+        const eqs = [];
+        for (let i = 0; i < n; i++) {
+          if (tiles[i].elevation <= seaL) continue;
+          const e = hy.accum[i] / hy.unit;
+          if (e >= T) { r[i] = 1; eqs.push(e); }
+        }
+        eqs.sort((a, b) => a - b);
+        const med = eqs.length ? +eqs[Math.floor(eqs.length * 0.5)].toFixed(2) : 0;
+        // Strahler：与 M31 同一套递推（filled 上游优先，沿 down 找子节点）
+        const order = new Int32Array(n);
+        const cells = [];
+        for (let i = 0; i < n; i++) if (r[i]) cells.push(i);
+        const ord = cells.slice().sort((a, b) => hy.filled[b] - hy.filled[a]);
+        const byOrder = new Map();
+        for (const x of ord) {
+          let best = 0, ties = 0;
+          for (const k of hy.adj[x]) {
+            if (!r[k] || hy.down[k] !== x) continue;
+            const o = order[k];
+            if (o > best) { best = o; ties = 1; } else if (o === best) ties++;
+          }
+          order[x] = best === 0 ? 1 : (ties >= 2 ? best + 1 : best);
+          byOrder.set(order[x], (byOrder.get(order[x]) || 0) + 1);
+        }
+        const orders = [...byOrder.keys()].sort((a, b) => a - b);
+        const rb = [];
+        for (let i = 0; i < orders.length - 1; i++) {
+          rb.push(+(byOrder.get(orders[i]) / byOrder.get(orders[i + 1])).toFixed(2));
+        }
+        // ★ 同一份数据的第二种口径：**Horton 河段口径**（正统定义）——
+        //   一条 k 级"河段" = 自身 order=k 且**上游没有 order=k 邻居**的节点开始的整条无分叉链。
+        //   数这样的起点即为第 k 级河段数 n_k，Rb = n_k / n_{k+1}。
+        //   格口径会把"链的长度"混进比值里（长链 = 该级格数虚高），河网变碎时虚高更明显。
+        const segCount = new Map();
+        for (const x of cells) {
+          const k = order[x];
+          let sameUp = false;
+          for (const k2 of hy.adj[x]) {
+            if (r[k2] && hy.down[k2] === x && order[k2] === k) { sameUp = true; break; }
+          }
+          if (!sameUp) segCount.set(k, (segCount.get(k) || 0) + 1);
+        }
+        const segOrders = [...segCount.keys()].sort((a, b) => a - b);
+        const rbSeg = [];
+        for (let i = 0; i < segOrders.length - 1; i++) {
+          rbSeg.push(+(segCount.get(segOrders[i]) / segCount.get(segOrders[i + 1])).toFixed(2));
+        }
+        out.push({ T, riverCells: cells.length, medianEq: med,
+          strahlerCounts: orders.map((o) => byOrder.get(o)), rb,
+          segCounts: segOrders.map((o) => segCount.get(o)), rbSeg });
+      }
+      return out;
+    })(),
     invariants: {
       degEquals2E: degSum === P.triToTile.length,
       filledGeElevation: geOK, downstreamStrictlyLower: monoOK,
@@ -512,7 +593,8 @@ const checks = [
     RV ? `${RV.triCount} 三角形 / ${RV.vertexCount} 顶点 / ${RV.chains} 条链 · ${RV.material} ${RV.color} · 建模 ${RV.buildMs} ms` : '未取到'],
   ['M31 河网分叉比（Strahler 最低阶）∈ [3,5]',
     RV && RV.bifurcation.length > 0 && RV.bifurcation[0] >= 3 && RV.bifurcation[0] <= 5,
-    RV ? `各级格数 ${RV.strahlerCounts.join('/')} → Rb ${RV.bifurcation.join('/')}` : '未取到'],
+    RV ? `格口径 ${RV.strahlerCounts.join('/')} → Rb ${RV.bifurcation.join('/')}｜` +
+      `河段口径(Horton 正统) ${RV.segCounts.join('/')} → Rb ${RV.rbSeg.join('/')}` : '未取到'],
   ['M32 河宽沿主下游不明显收腰（最大回缩 ≤ 25%）', RV && RV.maxWidthDipRel <= 0.25,
     RV ? `${RV.widthDips} 处回缩（占河格 ${(RV.widthDips / Math.max(1, R.V) * 100).toFixed(1)}%）｜最大幅度 ${(100 * RV.maxWidthDipRel).toFixed(1)}%` : '未取到'],
   // ★ H4.5 把 M33 的口径按设计书 §8.1 修正为"**最终入海**的河格 / 全部河格" ——
@@ -556,6 +638,13 @@ console.log(`对照（v1 台账口径 = 河格的二维邻接图，已证明与 
   `环 ${R.cellCycles} · 连通分量 ${R.cellComps} · 最大分量 ${R.cellLargest} 格`);
 console.log(`★ H3 风险诊断「河格是线还是片」：平均度 ${R.cellDegAvg}（树应 ≈2）· ` +
   `度≥3 占 ${R.cellDeg3Pct}% · 度分布 [0..6]=${R.degHist.join('/')}`);
+console.log('河网阈值扫描（河格 = 陆地且 accum/unit ≥ T，看能否同时救回 P0-2 与 M31）:');
+console.log('   T     河格数   汇水中位数   格口径各级格数 → Rb        河段口径各级段数 → Rb');
+for (const s of S.thresholdScan) {
+  const okMed = s.medianEq >= 20, okRb = s.rb.length && s.rb.every((v) => v >= 3 && v <= 5);
+  const okSeg = s.rbSeg.length && s.rbSeg.every((v) => v >= 3 && v <= 5);
+  console.log(`   ${String(s.T).padEnd(6)}${String(s.riverCells).padEnd(9)}${String(s.medianEq).padEnd(13)}${s.strahlerCounts.join('/').padEnd(17)}→ ${s.rb.join('/').padEnd(12)}${s.segCounts.join('/').padEnd(16)}→ ${s.rbSeg.join('/')}   ${okMed && okRb ? '★格口径过' : ''}${okSeg ? ' ★河段口径过' : ''}`);
+}
 console.log(`湖泊（★ H4）：${S.lakes.count} 个（最大 ${S.lakes.largest} 格，前 5 ${S.lakes.top5.join('/')}）· ` +
   `湖面共 ${S.lakes.totalCells} 格（占陆地 ${S.lakes.pctOfLand}%）· 最深 ${S.lakes.maxDepth}`);
 console.log(`内流盆地：${S.lakes.endorheic} 个（占湖 ${S.lakes.endorheicPct}%，其中干底 ${S.lakes.endorheicDry} 个）· ` +

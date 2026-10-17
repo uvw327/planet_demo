@@ -188,16 +188,102 @@ const CONFIG = {
   // ★ 阶段 A 重新标定：旧的 0.30 / 0.48 是按「旧湿度场」定的，而旧湿度场在副热带
   //   是从 0.005 直接跳到 0.375（10% 纬度内），阈值落在那段悬崖上，导致沙漠与森林直接相邻、
   //   草原只剩 1.39%。换成乘性湿度场后分布平滑了，阈值必须跟着重新落位。
-  //   新的两个阈值是按「参与湿度分类的陆地」的湿度分位定的（阶段 A 当时的基线是 2288 格、
-  //   约占陆地 35.6%；**地形地基后分母变了，H1 后这一比例是 60.73%**，阈值本身未动）：
-  //     沙漠   = 分位 ≤ p27   ≈ 0.25  → 约占陆地 10%
-  //     草原   = 分位 p27~p63 ≈ 0.65  → 约占陆地 13%
-  //     森林+雨林 = 分位 > p63        → 约占陆地 13%
-  //   这样「沙漠 → 半干旱草原 → 森林」三段各占约三分之一，且彼此都有连续过渡。
-  //   （H1 验收实测：草原 22.05%、沙漠 17.66%、雨林 9.92% —— 阈值没动，占比变化来自
-  //     "河流不再是群系"与"海拔场换过"，见 docs/v1-biome-globe-review.md §8）
-  moistureDesert: 0.25,   // 低于此值 → 沙漠
-  moistureGrassland: 0.65,// 低于此值 → 草原，以上 → 森林
+  //   两个阈值按「参与湿度分类的陆地」的湿度分位定（阶段 A 的方法论，见下方历史）。
+  //
+  // ★★ C 再标定（水汽输运换成 mapgen4 式输运方程后，湿度场的量纲整体变了 ——
+  //   副热带下沉脱湿改到只作用于陆地、信风把海洋水汽搬到大陆东岸，于是"湿"的格子
+  //   变得更湿、"干"的格子更干，旧阈值 0.25 / 0.65 相对新场过高：实测沙漠占陆地 49.1%、
+  //   森林仅 0.6%，M5/M5b 直接失守）。按新场分位重标：
+  //     沙漠   = 分位 ≤ p27   ≈ 0.07  → 目标约占参与分类陆地 27%
+  //     草原   = 分位 p27~p63 ≈ 0.23  → 目标约占参与分类陆地 36%
+  //     森林+雨林 = 分位 > p63        → 目标约占参与分类陆地 37%
+  //   （本次可分类陆地占陆地 72.7%；分位实测 p25=0.0671 / p50=0.1382 / p65=0.2287）
+  //
+  // 历史（阶段 A，湿度场为乘性 + 指数衰减，基线 2288 格约占陆地 35.6%；
+  //      地形地基后分母变了，H1 后这一比例是 60.73%，阈值当时未动）：
+  //     沙漠 ≤ p27 ≈ 0.25 · 草原 ≈ 0.65 · 森林 > p63
+  //   （H1 验收实测：草原 22.05%、沙漠 17.66%、雨林 9.92%，见 docs/v1-biome-globe-review.md §8）
+  moistureDesert: 0.07,   // 低于此值 → 沙漠
+  moistureGrassland: 0.23,// 低于此值 → 草原，以上 → 森林
+  // ★ C 新增第三档：森林再往上、足够"热带雨林"的湿度线。
+  //   理由见 classifyBiome() 第 5 步的注释 —— 只靠温度分雨林会让信风打湿的
+  //   副热带东岸整片变雨林（实测 p95 从 0.199 被推到 0.377）。
+  //   该值**不参与分位标定**（不随湿度场整体量纲平移）：0.65 对应的降水强度
+  //   （约 2000 mm/年）是雨林的**物理定义**，要动它得先有气候学依据。
+  moistureRainforest: 0.65,
+
+  /* --- ★ C（P0-4）水汽输运：风场 + 迭代降雨 ---
+   *
+   * 湿度**不再是纬度的解析函数**（旧：`latitudinalMoisture(absLat)` 一条曲线 + 噪声），
+   * 而是稳态「沿风平流 − 沿路降水 − 局地蒸发」的**迭代解**。
+   * 于是三条 P0-4 缺失的因果链全部自己长出来：
+   *   ① 东西岸差异 —— 信风把海洋水汽送到**东岸**、穿过大陆后在**西岸**已是强弩之末；
+   *   ② 内陆干旱   —— 水汽每过一格被降水抽走一截，离海越远越干（不需要"离海距离"公式）；
+   *   ③ 地形雨影   —— 容量判据：海拔越高空气能携带的水汽越少，超容量部分就地降下。
+   * 骨架照搬 mapgen4 `assignRainfall` + v3 已验证的球面化改造，
+   * 见 docs/sphere-terrain-plan.md §2.5–§2.6（v3 实测 12 次迭代收敛）。
+   * ★ 阶段 A 的 `latitudinalMoisture()` **没有被删**，它降级为迭代的**暖启动初值** ——
+   *   初值已经很接近真解，迭代次数因此从 40 次量级降到 12 次量级。
+   */
+  rain: {
+    /* --- 风场（三圈环流）--- */
+    windMode: 'zonal',     // 'zonal' = 三圈环流（默认）| 'uniform' = 单向风（调试对照）
+    windMeridional: 0.50,  // 经向风相对纬向风的强度：信风向赤道、西风向极地
+    windPhaseShift: 2,     // ★ 经向分量相对纬向分量的相位错开（度）。**不能为 0**：
+                           //   若两者同相，30°/60° 处 (u,v) 同时归零 = 副热带高压整条静止线，
+                           //   水汽输运恰好断在最有问题的地方（副热带），带与带再也联系不上。
+    windUniformDir: [1, 0, 0],   // 'uniform' 模式的风向（调试用）
+
+    /* --- 降水 --- */
+    raininess: 0.9,        // 全局降雨强度
+    rainReference: 0.40,   // moisture = clamp(rainfall / 该值, 0, 1)。**固定**参考值而非运行时最大值，
+                           //   否则改 raininess 会被归一化抵消，群系分布再也调不动
+    convectiveRain: 0.5,   // 平流水汽直接降下的雨（对流降水）
+    stormTrack: 0.70,      // ★ 中纬风暴带（极锋辐合带）降水强度 —— 缺了它「中纬次湿」这一环不存在：
+                           //   海洋饱和湿度 ∝ T²，副热带永远比中纬湿，45° 会比 30° 还干
+    stormTrackLat: 48,     // 风暴带中心纬度（度）
+    stormTrackWidth: 12,   // 风暴带宽度（度）—— **不能太大**，否则雨被带进副热带，救活了"副热带最干"
+
+    /* --- 蒸发 --- */
+    oceanEvaporation: 0.35,// 海洋向"温度决定的饱和湿度"松弛的速率（球面无边界，这就是水汽源）
+    landEvaporation: 0.22, // ★ 陆面蒸发速率（每轮以该速率把 humidity 拉向本地蒸发平衡值）。
+                           //   这是"平流供水"与"本地回补"的平衡旋钮，C 的标定区间由两条约束夹出：
+                           //   · 0.55（v3 的值）：本地蒸发自己就补到 0.19，"风从哪吹来"的信号被冲淡
+                           //     → 副热带东岸/西岸湿度差只有 0.048（P0-4① 要 ≥0.10，不过）。
+                           //   · 0.32–0.42（C 标定过程实测）：干区回补抬高，能改善雨影（② 0.095 → 0.115）
+                           //     与 Strahler 3 级河格（11 → 21），**但收益在 Rb ≈ 6.6 处饱和**，
+                           //     依然够不到 M31 的门槛 5，反而把沙漠挤没（占陆地 19.3% → 8.4%，
+                           //     M5「沙漠占参与分类 25–40%」直接失守）。代价明确、收益封顶，故取 0.22。
+                           //   0.22 下平流主导：内陆靠上风向供水，断供就干（内陆干旱）。
+                           //   （v3 的 0.55 是在陆地占比 68% 的世界上定的，我们是 38% + 海洋源充足。）
+    landSaturation: 0.55,  // 陆面蒸发的饱和上限（再乘 T^exp：暖地湿、寒地干，天然有界）
+    evaporationExponent: 2.0,  // 饱和湿度 ∝ T^exp（暖海蒸发快、冷海几乎不蒸发）
+    saturationFloor: 0.15, // 冷海最低饱和湿度（极地海洋也干 → 极地荒漠）
+
+    /* --- 副热带下沉脱湿（★ 沙漠带唯一造得出来的路径）--- */
+    // 球面没有"边界海洋"可言，四面环海的大陆光靠"离海远"造不出沙漠；
+    // 只有下沉气流能把副热带整条带压干 —— 实测证据见 sphere-terrain-plan.md §12.3。
+    subtropicalLat: 30,    // 下沉中心纬度（度）
+    subtropicalWidth: 14,  // 下沉带宽（度）
+    subtropicalStrength: 0.62,  // 脱湿强度（0–0.8）
+
+    /* --- 地形雨影 --- */
+    rainShadow: 0.5,       // 超容量降水的提取率（mapgen4 原判据：容量 = 1 − 陆地相对高度）
+    // ★ P0-4 抬升降水：**与 v3 分歧的一条，理由必须记在这里**。
+    //   v3 把显式的 `orographic` 删了，理由是"容量 = 1 − 相对高度"已经涵盖雨影
+    //   （见 sphere-terrain-plan.md §2.6.2）。但那条判据要求 humidity > capacity，
+    //   而我们这版场被副热带下沉压到 humidity ≈ 0.19–0.30 ⇒ 需要 relief > 0.7
+    //   （elevation > 0.81，只有雪峰级才够）才触发 —— **雨影根本不会发生**，
+    //   实测迎风/背风差只有 0.023。所以抬升项必须显式给出来：
+    //   空气每爬高一段就冷却析出一部分，这正是"雨影 = 抬升冷却 → 超容量降水"的字面实现。
+    orographic: 0.55,      // 抬升时最多从水汽里抽走多少比例（同时计入降水）
+    upliftScale: 0.06,     // 一格内的高差达到此值即视为"抬升饱和"（约等于山顶）
+
+    /* --- 求解器 --- */
+    rainSolver: 'gaussSeidel',  // 'gaussSeidel'（默认，暖启动 + 原地更新）| 'jacobi'（调试对照）
+    rainMaxIter: 400,      // 迭代上限（v3 实测 12 次收敛）
+    rainTolerance: 1e-4,   // 收敛残差（L∞）
+  },
 
   /* --- 地形高度（FBM）--- */
   // ★ 地基改造：把「一块 96.83% 的超大陆」拆成「一个主大陆 + 若干次级大陆」。
@@ -267,9 +353,17 @@ const CONFIG = {
   //   与 `lakeShallowDepth`（渲染层）。
   //   见 docs/river-system-design.md §4、§7。
   hydro: {
-    runoffExponent: 1.5,     // 降水 → 产流的非线性指数：>1 拉开干湿差（湿处河密、干处河疏）
+    // ★★ C 重标定 1.5 → 1.2（湿度场量纲变了，非线性必须跟着松）：
+    //   1.5 是按**旧湿度场中位数 0.43** 标的；C 的输运方程把中位数压到 0.138，
+    //   而 x^1.5 在低值区极陡 —— 0.138^1.5 = 0.051（线性本该 0.138，被压掉 62%），
+    //   中等湿度区的产流集体塌陷，中等流域长不出来。实测后果（H4.5 基线 → C 初版）：
+    //   Strahler 3 级河格 46 → 11、分叉比 Rb 4.99 → 7.66、河格汇水中位数 20.03 → 18.59。
+    //   降到 1.2 后 0.138^1.2 = 0.091（压掉 34%），中低湿度区的产流回升 —— 这与群系阈值
+    //   按分位重标是同一套方法论：**场的量纲变了，标定在场上的参数必须重标**。
+    //   （原设计意图保留：>1 仍拉干湿差，P0-2「沙漠里天然无河」的干湿密度比有巨大余量）
+    runoffExponent: 1.2,     // 降水 → 产流的非线性指数：>1 拉开干湿差（湿处河密、干处河疏）
     fillEpsilon: 1e-4,       // Priority-Flood 每步的抬升量：保证 filled 处处严格下坡（§4.3）
-    flowExponent: 1.1,       // 多流向的坡度幂：1 = 最平滑，越大越接近"只走最陡邻居"（直线感）
+    flowExponent: 1.5,       // 多流向的坡度幂：1 = 最平滑，越大越接近"只走最陡邻居"（直线感）
     // 河网阈值，单位是「等效格数」（accum ÷ 陆地平均产流）。
     // ★ 12 是 tools/lab-hydro.mjs 扫出来的（T ∈ {3,5,8,12,20,30} × F × R 共 54 组，见
     //   docs/hydro-layer.md §3）。它不是拍脑袋：12 是**满足"河格汇水面积中位数 ≥ 20 格"的
@@ -297,12 +391,17 @@ const CONFIG = {
     //
     // ★ 取 2.0 是**按物理量级标定的**，不是凑 M18（实测 M18 ∈ [5,25] 对 PE ∈ [0.5, 8] 都成立，
     //   所以单看 M18 定不下来）：
-    //     最干最热的一格蒸发 = PE × 温度 × 干燥度 = 2.0 × 0.9 × 0.95 ≈ 1.7，
-    //     而陆地平均产流 unit ≈ 0.25 → 比值 ≈ 7 倍。
-    //     地球上沙漠的潜在蒸发（2000–3000 mm/a）对全球平均径流（≈300 mm/a）正是 **7–10 倍**。
-    //   实测结果：19 个湖里 9 个内流（其中 5 个干底）、最大的 5 个湖全部外流（淡水），
-    //   与"内流盆地是少数、且只出现在干旱区"一致。
-    potentialEvaporation: 2.0,
+    //     最干最热的一格蒸发 = PE × 温度 × 干燥度 = PE × 0.9 × 0.95 ≈ PE × 0.855，
+    //     与陆地平均产流 unit 的比值应在 **7–10 倍**（地球上沙漠潜在蒸发 2000–3000 mm/a
+    //     对全球平均径流 ≈300 mm/a）。
+    //
+    // ★★ C 重标定 2.0 → 1.1（湿度场换成输运方程后 unit 变了，比值必须跟着走）：
+    //   旧湿度场下 unit ≈ 0.25 → 2.0/0.25 的比值 ≈ 7 ✓；C 的场让干区更干、湿区更湿，
+    //   陆地平均产流 unit 降到 0.1274（产流总和 1982.66 ÷ 陆地 15565 格），
+    //   若 PE 不动，比值涨到 13.5 —— 超出地球物理范围，后果是内流盆地大面积干底
+    //   （实测 18 个盆地里 14 个干底、最大湖从 ≥15 格缩到 12 格）。
+    //   取 PE = 1.1 → 0.94 ÷ 0.1274 ≈ **7.4 倍**，回到地球量级；实测内流盆地与最大湖随之回升。
+    potentialEvaporation: 1.1,
     // 湖面颜色分档的阈值（渲染层，单位 = 海拔）：depthMean 低于它算"浅湖"，否则"深湖"。
     // 实测 level 6 的湖深中位数 ≈ 0.0059，所以 0.006 正好切在中位附近。
     lakeShallowDepth: 0.006,
@@ -912,6 +1011,13 @@ function computeElevations(tiles) {
 /**
  * 纬向基础湿度 —— 三圈环流模型（★ 阶段 A 改为「乘性脱湿」）。
  *
+ * ★★ C（P0-4）之后，本函数**不再直接决定湿度**，只作为 `computeMoistureField()`
+ *   迭代求解的**暖启动初值**：初值已经很接近真解，迭代次数因此只要十几次
+ *   （v3 实测 12 次，见 docs/sphere-terrain-plan.md §2.6.2）。
+ *   真正的湿度由「风 + 降水 + 蒸发」的稳态解给出 —— 纬向带序则由
+ *   ① 蒸发的温度依赖、② 风带本身、③ 副热带下沉脱湿、④ 中纬风暴带**共同涌现**，
+ *   而不是靠这条曲线硬编码。以下描述的是"初值长什么样"，不是最终湿度。
+ *
  * 大气环流决定了降水在地球上的带状分布，这条规律与温度无关：
  *   赤道（|lat| ≈ 0.00）  上升气流 → 湿润   （热带雨林带）
  *   副热带（≈ 0.40）      下沉气流 → 干旱   （撒哈拉、阿拉伯、澳洲沙漠带）
@@ -943,17 +1049,17 @@ function latitudinalMoisture(absLat) {
 }
 
 /**
- * 计算一个图块的气候（温度、湿度），结果写回 tile 上。
+ * 计算一个图块的**温度**（★ C 起湿度移出本函数，见 computeMoistureField）。
  *
  * 温度：以太阳辐射为基础 —— 太阳高度角随纬度下降，入射能量正比于 cos(纬度)，
  *       而 center.y === sin(纬度)，所以 cos(纬度) = sqrt(1 - lat²)。
  *       再按「陆地相对高度」做气温直减（海拔越高越冷）。
  *
- * 湿度：三圈环流的纬向基础值，叠加噪声让气候边界不规则（避免出现完美的环带）。
+ * 为什么湿度不能留在这儿：它依赖**邻居格的水汽**（水汽是被风吹过来的），
+ * 逐格独立的函数算不出来 —— 必须先建风场再整体迭代，见 computeMoistureField()。
  */
 function computeClimate(tile) {
   const lat = tile.latitude;
-  const absLat = Math.abs(lat);
 
   // --- 温度 ---
   const insolation = Math.sqrt(Math.max(0, 1 - lat * lat));   // = cos(地理纬度)
@@ -967,18 +1073,248 @@ function computeClimate(tile) {
   tile.temperature = clamp01(
     insolation - landRelief * CONFIG.lapseRate + tempJitter * CONFIG.tempNoise,
   );
+}
 
-  // --- 湿度 ---
-  // ★ 阶段 A：乘性扰动（见 CONFIG.moistureNoise 的注释）。
-  //   基础湿度来自三圈环流的纬向包络，`exp(jitter · k)` 给它加上大尺度的起伏，
-  //   让气候边界不规则 —— 但**不会**把干旱区推成精确的 0。
-  const base = latitudinalMoisture(absLat);
-  const moistJitter = sampleNoise3D(
-    tile.center.x * CONFIG.climateScale + OFFSET_E.x,
-    tile.center.y * CONFIG.climateScale + OFFSET_E.y,
-    tile.center.z * CONFIG.climateScale + OFFSET_E.z,
-  );
-  tile.moisture = clamp01(base * Math.exp(moistJitter * CONFIG.moistureNoise));
+/* =========================================================================
+ * §4.4.1  水汽输运（★ C / P0-4）：风场 + 平流-降水-蒸发的稳态迭代
+ *
+ * 目标：把湿度从「纬度的解析曲线」换成**因果链的解**：
+ *   风从哪吹来 → 水汽从哪来 → 一路下多少雨 → 还剩多少 → 到这里干不干。
+ * 于是 P0-4 列的三条缺失现象**自己长出来**，不需要为它们各写一条公式：
+ *   · 东西岸差异：信风从海洋吹向**东岸**，穿过整块大陆后**西岸**已近枯竭；
+ *   · 内陆干旱：  每过一格被降水抽走一截，衰减长度 ≈ 1/convectiveRain；
+ *   · 地形雨影：  空气越稀薄能携带的水汽越少（容量 = 1 − 相对高度），
+ *                 迎风坡超容量 → 就地降下，背风坡因此无雨可下。
+ * 骨架 = mapgen4 `assignRainfall` + v3 已验证的球面化改造
+ *       （docs/sphere-terrain-plan.md §2.5–§2.6，v3 实测 12 次迭代收敛）。
+ * ========================================================================= */
+
+/**
+ * 风场（★ C）：三圈环流的纬向 + 经向风，投影到球面切平面。
+ *
+ * 返回 Float64Array(n×3) 扁平数组 —— 迭代时每格每轮都要读自己的风向量，
+ * 扁平数组比 4 万个 Vector3 少一整轮对象分配/GC（与 v3 同样的取舍）。
+ *
+ * 构造（θ = |纬度|，度）：
+ *   纬向 u(θ) = −cos(6°·(θ − 15°))
+ *       → 15° 信风 −1（东风）、45° 西风 +1、75° 极地东风 −1，
+ *         零点恰好落在 0/30/60/90（带边界与极点），全程光滑。
+ *   经向 v(θ) = −windMeridional · cos(6°·(θ − (15° − windPhaseShift))) · sign(lat)
+ *       → 信风向赤道、西风向极地、极地向赤道（北半球），南半球取镜像；
+ *         两半球在赤道都指向赤道 ⇒ ITCZ 辐合，赤道多雨自动出现。
+ *
+ * ★ 为什么经向分量必须**比纬向错开 windPhaseShift 度**：
+ *   若两者同相，30°/60° 处 (u,v) 同时归零 ⇒ 副热带高压整条纬线成为**静止线**，
+ *   水汽输运恰好断在最该连通的地方（带与带再也交换不了水汽），
+ *   而「上风向加权平均」还会因为全零风向而退化成本格自持。
+ *   错开之后 30° 处 u=0 但 v≠0：那条线只在**经向**上交换水汽，正好是
+ *   「副热带高压地面辐散」该有的样子，且风速处处不为零。
+ *
+ * 极点：east/north 基向量随 ρ = √(x²+z²) → 0 退化，取一组固定正交基兜底（不产生 NaN）。
+ *       极地群系由温度带（冰原 / 海冰）判定，那两三个格子的风向异常不影响画面。
+ */
+function assignWind(tiles) {
+  const n = tiles.length;
+  const cfg = CONFIG.rain;
+  const wind = new Float64Array(n * 3);
+  const uniform = cfg.windMode === 'uniform';
+  const phase = 15 - cfg.windPhaseShift;
+  const k = Math.PI / 180 * 6;                        // 带函数角频率：6° 一个四分之一周期
+
+  for (let i = 0; i < n; i++) {
+    const c = tiles[i].center;
+    let wx, wy, wz;
+
+    if (uniform) {
+      // 调试对照：全局单向风，投影到该点切平面（风必须贴着球面吹）
+      const d = cfg.windUniformDir;
+      const dot = d[0] * c.x + d[1] * c.y + d[2] * c.z;
+      wx = d[0] - dot * c.x; wy = d[1] - dot * c.y; wz = d[2] - dot * c.z;
+    } else {
+      const sign = c.y >= 0 ? 1 : -1;                 // c.y = sin(纬度)
+      const theta = Math.asin(Math.min(1, Math.abs(c.y))) * 180 / Math.PI;
+      const u = -Math.cos(k * (theta - 15));                                   // 纬向（东正）
+      const v = -cfg.windMeridional * Math.cos(k * (theta - phase)) * sign;    // 经向（北正）
+
+      const rho = Math.hypot(c.x, c.z);
+      let ex, ey, ez, nx, ny, nz;
+      if (rho > 1e-9) {
+        ex = -c.z / rho;  ey = 0;            ez = c.x / rho;      // 东向
+        nx = -c.x * c.y / rho; ny = rho;     nz = -c.z * c.y / rho; // 北向（都在切平面内）
+      } else {
+        ex = 1; ey = 0; ez = 0;                                   // 极点兜底：任取一组正交基
+        nx = 0; ny = 0; nz = -1;
+      }
+      wx = u * ex + v * nx; wy = u * ey + v * ny; wz = u * ez + v * nz;
+    }
+
+    const len = Math.hypot(wx, wy, wz);
+    if (len > 1e-12) { wx /= len; wy /= len; wz /= len; }
+    else { wx = 1; wy = 0; wz = 0; }               // 理论上到不了（见 windPhaseShift 注释）
+    wind[3 * i] = wx; wind[3 * i + 1] = wy; wind[3 * i + 2] = wz;
+  }
+  return wind;
+}
+
+/**
+ * 水汽输运求解（★ C / P0-4）：平流 − 降水 − 蒸发的稳态迭代。
+ *
+ * 每格维护大气水汽含量 `humidity ∈ [0,1]`，一轮迭代依次做五件事：
+ *   ① 平流：上风向邻居按 `(邻点 − 本点)·风` 的投影加权平均
+ *           （投影 ≥ 0 说明邻居在**下风向**，不供水汽，跳过）
+ *   ② 降水：平流水汽直接降一部分 + **中纬风暴带**加成
+ *           （缺了风暴带：饱和湿度 ∝ T²，副热带永远比中纬湿 ⇒ 中纬比副热带还干，
+ *             三圈环流的第三环根本不存在 —— v3 教训见 §2.6.1）
+ *   ③ 蒸发：海面/陆面分别向「温度决定的饱和湿度」松弛
+ *           （球面没有边界可当水汽源 ⇒ 海面松弛就是源；
+ *             陆面松弛缺不得 ⇒ 否则超级大陆腹地干到不可用 —— v3 教训 §2.6.2）
+ *   ④ 副热带下沉脱湿（沙漠带**唯一**造得出来的路径：球面上"离海远"不足以造沙漠）
+ *   ⑤ 地形雨影 —— 两条判据，缺一不可：
+ *      (a) mapgen4 容量判据（humidity > 1 − 相对高度 → 超容量部分降下）；
+ *      (b) ★ 抬升判据：沿**上风向**的高差 > 0（空气在爬坡）→ 冷却析水。
+ *          只有 (a) 不够：我们的场被下沉压低到 humidity ≈ 0.2，(a) 要求 relief > 0.7
+ *          （雪峰级海拔）才触发，实测雨影差只剩 0.023。加 (b) 后雨影由"爬坡量"驱动，
+ *          迎风坡抽干水汽、背风坡无水可下 —— 详见 CONFIG.rain.orographic 的注释。
+ *
+ * ★ 最终写进 tile.moisture 的是 **rainfall**（每格降水量）而非 humidity：
+ *   群系由**降水**决定，而迎风坡 rainfall 大、背风坡 rainfall 小 ——
+ *   雨影因此直接体现在湿度上，不需要"迎风/背风"的显式判定。
+ *
+ * 收敛：Gauss-Seidel 原地更新（或 Jacobi 对照），暖启动初值 = latitudinalMoisture()。
+ * 蒸发松弛项使每格都是压缩映射，**谱半径 < 1 ⇒ 与扫描顺序无关**（顺序只影响快慢）。
+ *
+ * 返回值存进 `world.climate`：风场、每格降雨、迭代统计与耗时（供自测/验收脚本使用）。
+ */
+function computeMoistureField(tiles, adj) {
+  const t0 = performance.now();
+  const cl = CONFIG.rain;
+  const n = tiles.length;
+  const sea = CONFIG.seaLevel;
+
+  const wind = assignWind(tiles);
+
+  // ① 暖启动：纬度气候学解析解（阶段 A 的成果降级为初值，省掉大半迭代）
+  const hum = new Float64Array(n);
+  for (const t of tiles) hum[t.index] = clamp01(latitudinalMoisture(Math.abs(t.latitude)));
+
+  const gs = cl.rainSolver !== 'jacobi';
+  const prev = gs ? null : Float64Array.from(hum);
+  const rain = new Float64Array(n);
+  let iter = 0, residual = Infinity;
+
+  // 抬升量 rise = 本格高程 − 上风向加权平均高程（风与邻接固定 ⇒ 一轮算好全轮复用）。
+  // 用与平流完全相同的一套上风向权重，"沿这条流线空气爬了多高"才有明确含义。
+  const rise = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = tiles[i].center;
+    const wx = wind[3 * i], wy = wind[3 * i + 1], wz = wind[3 * i + 2];
+    let esum = 0, wsum = 0;
+    for (const j of adj[i]) {
+      const p = tiles[j].center;
+      const proj = (p.x - c.x) * wx + (p.y - c.y) * wy + (p.z - c.z) * wz;
+      if (proj >= 0) continue;
+      esum += (-proj) * tiles[j].elevation;
+      wsum += -proj;
+    }
+    rise[i] = wsum > 1e-15 ? tiles[i].elevation - esum / wsum : 0;
+  }
+
+  while (iter < cl.rainMaxIter && residual > cl.rainTolerance) {
+    if (!gs) prev.set(hum);                           // Jacobi：本轮读上一轮
+    const src = gs ? hum : prev;
+    residual = 0;
+
+    for (let i = 0; i < n; i++) {
+      const t = tiles[i];
+      const c = t.center;
+      const wx = wind[3 * i], wy = wind[3 * i + 1], wz = wind[3 * i + 2];
+
+      // ① 平流：只取上风向邻居（投影 < 0 = 邻居在上风侧）
+      let sum = 0, wsum = 0;
+      for (const j of adj[i]) {
+        const p = tiles[j].center;
+        const proj = (p.x - c.x) * wx + (p.y - c.y) * wy + (p.z - c.z) * wz;
+        if (proj >= 0) continue;
+        const w = -proj;
+        sum += src[j] * w;
+        wsum += w;
+      }
+      // 上风向邻居一个都没有（辐散点 / 极点）：本格自持，靠后面蒸发补水
+      let humidity = wsum > 1e-15 ? sum / wsum : src[i];
+
+      const latDeg = Math.abs(Math.asin(Math.min(1, Math.max(-1, c.y))) * 180 / Math.PI);
+
+      // ② 降水 = 平流水汽的对流降水 + 中纬风暴带
+      let rainfall = cl.raininess * humidity * cl.convectiveRain;
+      const dStorm = (latDeg - cl.stormTrackLat) / cl.stormTrackWidth;
+      rainfall += cl.raininess * cl.stormTrack * Math.exp(-dStorm * dStorm)
+        * humidity * cl.convectiveRain;
+
+      // ③ 蒸发：向温度决定的饱和湿度松弛（暖海快、冷海慢）
+      const warm = Math.pow(clamp01(t.temperature), cl.evaporationExponent);
+      if (t.elevation <= sea) {
+        const sat = cl.saturationFloor + (1 - cl.saturationFloor) * warm;
+        humidity += (sat - humidity) * cl.oceanEvaporation;
+      } else {
+        humidity += (cl.landSaturation * warm - humidity) * cl.landEvaporation;
+      }
+
+      // ④ 副热带下沉脱湿 —— **只对陆地生效**（★ C 实测修正，理由不能删）：
+      //    副热带高压确实压在海洋上（亚速尔 / 夏威夷 / 南大西洋），但海面**不干**：
+      //    海面蒸发补得快、边界层照样潮湿，下沉压掉的是**降水**（少雨），
+      //    而"干燥"是大陆的属性 —— 下沉抑制对流 + 大陆性离水汽源远。
+      //    第一版对海面一视同仁地乘 0.38 ⇒ 副热带海面 humidity 只剩 0.15，
+      //    信风送出来的水汽本来就干 ⇒ 东西岸湿度差只有 0.026（验收要 0.10）。
+      //    改成只压陆地后，副热带海面 h 回到饱和，信风把它整块搬到大陆东岸。
+      //    乘性形式不变：压干但永不归零，带与带之间仍是连续过渡。
+      if (t.elevation > sea) {
+        const dd = (latDeg - cl.subtropicalLat) / cl.subtropicalWidth;
+        humidity *= 1 - Math.exp(-dd * dd) * cl.subtropicalStrength;
+      }
+
+      // ⑤ 地形雨影
+      const relief = t.elevation > sea ? (t.elevation - sea) / (1 - sea) : 0;
+      const capacity = Math.min(1, Math.max(0.05, 1 - relief));
+      if (humidity > capacity) {                 // (a) mapgen4 容量判据：高山顶把超容量部分降下
+        const drop = cl.rainShadow * (humidity - capacity);
+        rainfall += cl.raininess * drop;
+        humidity -= drop;
+      }
+      if (rise[i] > 0) {                         // (b) ★ 抬升判据（P0-4）：沿流线爬坡 → 冷却析水
+        const drop = cl.orographic * Math.min(1, rise[i] / cl.upliftScale) * humidity;
+        rainfall += cl.raininess * drop;
+        humidity -= drop;
+      }
+
+      humidity = clamp01(humidity);
+      const d = Math.abs(humidity - hum[i]);
+      if (d > residual) residual = d;
+      hum[i] = humidity;
+      rain[i] = rainfall;
+    }
+    iter++;
+  }
+
+  // ② 写回 tile.moisture：降水归一化 × 大尺度噪声（只负责打碎残余的纬向对称）
+  const inv = 1 / cl.rainReference;
+  for (const t of tiles) {
+    const jitter = sampleNoise3D(
+      t.center.x * CONFIG.climateScale + OFFSET_E.x,
+      t.center.y * CONFIG.climateScale + OFFSET_E.y,
+      t.center.z * CONFIG.climateScale + OFFSET_E.z,
+    );
+    t.moisture = clamp01(rain[t.index] * inv * Math.exp(jitter * CONFIG.moistureNoise));
+  }
+
+  return {
+    wind,
+    rainfall: rain,
+    humidity: hum,
+    rise,          // 沿流线的抬升量（诊断用：雨影强度直接由它驱动）
+    iterations: iter,
+    residual,
+    elapsed: performance.now() - t0,
+  };
 }
 
 /**
@@ -1026,7 +1362,13 @@ function classifyBiome(tile) {
   // 5. 温带 / 热带：在温度带内部再按湿度划分
   if (moisture < CONFIG.moistureDesert) return BIOME.DESERT;
   if (moisture < CONFIG.moistureGrassland) return BIOME.GRASSLAND;
-  return temperature > CONFIG.tempTropical ? BIOME.RAINFOREST : BIOME.FOREST;
+  if (temperature <= CONFIG.tempTropical) return BIOME.FOREST;
+  // ★ C：雨林要求**比森林更湿**，不能只看"温度够热"。
+  //   物理上热带雨林要年降水 >2000 mm，而热带草原/季雨林 900–1500 mm 就够；
+  //   只按温度分的话，信风搬来的水汽只要把 15°–25° 的东岸打湿，那里就整片变雨林
+  //   （C 实测：雨林 |lat| p95 被推到 0.377，而基线 0.199）。加上湿度上限后，
+  //   沿岸是"热带森林"，只有真正最湿的赤道核心区才是雨林。
+  return moisture >= CONFIG.moistureRainforest ? BIOME.RAINFOREST : BIOME.FOREST;
 }
 
 /**
@@ -1042,16 +1384,25 @@ function classifyBiome(tile) {
  *
  * ★ H2：气候之后接上水文（computeHydrology 需要海拔 + 湿度 + 温度三者齐备）。
  *   H3 起还要在这里调用 buildRiverGeometry() 重建河网几何体 —— 见设计稿 §10.3。
+ * ★ C：气候必须拆成**两遍**——温度逐格独立（可边算边用），湿度要靠**邻居的水汽**，
+ *   必须等全部温度就绪、风场建好、整体迭代收敛之后才能分类群系。
  */
 function recomputeTerrain() {
   computeElevations(tiles);
   for (const tile of tiles) {
     tile.latitude = tile.center.y;                // 纬度 ∈ [-1, 1]，即 sin(地理纬度)
-    computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
-    tile.biome    = classifyBiome(tile);
+    computeClimate(tile);                         // 只算温度（★ C：湿度移到下面）
   }
+
+  // ★ C（P0-4）：水汽输运 —— 湿度 = 「风 + 降水 + 蒸发」的稳态解。
+  //   邻接表提到最外层算一次，湿度场与水文层共用（同一批边，不重复建两遍）。
+  const adj = buildAdjacency(tiles);
+  world.climate = computeMoistureField(tiles, adj);
+
+  for (const tile of tiles) tile.biome = classifyBiome(tile);   // 湿度就绪后才能分类
+
   // 水文覆盖层的数据层（★ H2）。纯计算，渲染层不感知 —— H2 阶段画面上还看不到河。
-  world.hydro = computeHydrology(tiles);
+  world.hydro = computeHydrology(tiles, adj);
 }
 
 /* =========================================================================
@@ -1631,11 +1982,11 @@ function sameSinkSet(a, b) {
  * ■ 输出统计口径：`sinkRounds` = 截断迭代轮数，`sinkBlocked` = 被清零的出边条数
  *   （它 > 0 才说明"水真的被内流盆地拦住了"，是 H4.5 生效的直接证据）。
  */
-function computeHydrology(tiles) {
+function computeHydrology(tiles, adj) {
   const t0 = performance.now();
   const n = tiles.length;
 
-  const adj = buildAdjacency(tiles);
+  if (!adj) adj = buildAdjacency(tiles);   // ★ C：邻接表由 recomputeTerrain 建好传进来复用
   const filled = priorityFlood(tiles, adj);
   let w = flowWeights(tiles, adj, filled);
   let down = mainDownstream(n, w);
@@ -2253,6 +2604,25 @@ const world = {
   ore: null,         // Int8Array：0 = 无矿，>0 = 矿种 id
   oreAmount: null,   // Uint16Array：储量
   owner: null,       // Int16Array：归属，-1 = 无主
+
+  /**
+   * 气候层的水汽输运诊断（★ C / P0-4，由 computeMoistureField() 填充）。
+   *
+   * 与 `hydro` 同样的性质：纯数据、一次性算完、渲染层不感知。
+   * 之所以要留一份在 world 上，是因为 P0-4 的验收（东西岸差、雨影、经向标准差）
+   * 必须能沿着**风场**去追上风向，而风场只在这里存在。契约：
+   *   wind        Float64Array(n×3)  每格风向（单位切向量，扁平三元组）
+   *   rainfall    Float64Array(n)    每格降水量（= moisture 的未归一化来源）
+   *   humidity    Float64Array(n)    收敛后的大气水汽含量（moisture 不是它，见下）
+   *   rise        Float64Array(n)    沿流线的抬升量（本格高程 − 上风向加权平均高程）
+   *   iterations  number             收敛所用迭代轮数（v3 基线 12）
+   *   residual    number             收敛残差（L∞，应 ≤ rainTolerance）
+   *   elapsed     number             本层耗时（ms）
+   *
+   * ★ `tile.moisture = rainfall / rainReference × 噪声` —— 用降水而非水汽，
+   *   因为群系（沙漠/草原/森林）由**降水**决定，雨影也直接体现在降水上。
+   */
+  climate: null,
 
   /**
    * 水文层（★ H1 立空壳，H2 由 computeHydrology() 填充）。
