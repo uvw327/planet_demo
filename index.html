@@ -307,6 +307,16 @@ const CONFIG = {
     // 实测 level 6 的湖深中位数 ≈ 0.0059，所以 0.006 正好切在中位附近。
     lakeShallowDepth: 0.006,
 
+    // --- H4.5：内流盆地当**汇**（数据层开关；false + refresh() = 回到 H4 的状态，便于 A/B）---
+    // ★ 为什么需要它：DEM 的填平面会**翻过溢出点**，所以 H4 里 `down` 从内流湖出去仍然有路 ——
+    //   于是河网里留着一条**没有水量**的出湖河（视觉上：盐湖边上流出一条河），
+    //   `M33 入海率`也因此恒为 100% —— 而设计书 §8.1 的 M33 定义是"**最终入海**的河格占比"。
+    // ★ 怎么修：把内流盆地格的 MFD 出边权重清零（`blockSinks`），水到湖为止，再重算
+    //   accum / down / 河网。设计书 §4.10 的伪代码缺的就是这一步（它只写到"找到内流湖"）。
+    // ★ 为什么是迭代而不是一次：截断会减少**下游**的 accum，上游有内流湖的湖因此水位更低、
+    //   可能变成新的内流湖（内流集合单调扩张 → 必然收敛）。实测 1 轮即稳。
+    endorheicAsSink: true,
+
     // --- H3 渲染层：三角带河网（见 docs/river-system-design.md §5）---
     // ★ 宽度与抖动的单位都是「格」（会乘上实测格间距才变成世界单位），
     //   所以换 level 不用重标；只有"看起来的粗细"变了才会需要调它们。
@@ -1293,13 +1303,22 @@ function flowWeights(tiles, adj, filled) {
  *   河网阈值可以用"汇水面积 ≥ 20 格"这种与气候解耦的单位表达。
  * ★ 用 Float64 而不是 Float32：4 万个格子逐级累加，Float32 的相对误差会到 1e-3，
  *   而"水量守恒"要拿它当断言（Σ 产流 == Σ 终点 accum）。
+ * ★ `order`（拓扑序）只依赖 `filled` —— H4.5 要反复重算 accum（内流盆地迭代截断），
+ *   所以由外面算一次传进来复用；不传也能用（旧调用点）。
  */
-function accumulate(filled, w, runoff) {
+/** 拓扑序：filled 降序。处理到某格时，**所有上游格子都已经把水发过来了**。 */
+function buildFlowOrder(filled) {
   const n = filled.length;
-  const accum = new Float64Array(runoff);            // 初值 = 本格产流
   const order = new Array(n);
   for (let i = 0; i < n; i++) order[i] = i;
   order.sort((a, b) => filled[b] - filled[a]);       // 高 → 低
+  return order;
+}
+
+function accumulate(filled, w, runoff, order) {
+  const n = filled.length;
+  const accum = new Float64Array(runoff);            // 初值 = 本格产流
+  if (!order) order = buildFlowOrder(filled);
 
   for (let i = 0; i < n; i++) {
     const x = order[i];
@@ -1348,7 +1367,10 @@ function mainDownstream(n, w) {
  *
  * 顺带产出两个玩法字段：
  *   isSource —— 有河、但没有"沿主下游流入自己"的上游河格（河源）；
- *   isMouth  —— 有河、且主下游是海洋/终点（河口，河从这里入海）。
+ *   isMouth  —— 有河、且主下游是**终点**（`down < 0` 或主下游是海洋）。
+ *               ★ H4.5 起"终点"里包含**内流盆地**（`down = −1`，河在这里终止但**不入海**）：
+ *               所以 isMouth 的语义是"**河的终点**"，不是"入海口"。
+ *               真正的入海口径看 **M33**（沿 `down` 一路追到海格才算），HUD 会显示"入湖口"区分。
  */
 function extractRivers(tiles, adj, filled, accum, unit, down) {
   const n = tiles.length;
@@ -1426,10 +1448,11 @@ function extractRivers(tiles, adj, filled, accum, unit, down) {
  *   会铺满整个盆地（卫星图上的塔里木、大自流盆地、乌尤尼都是这样）。这样即使水位低到没有明水，
  *   盆地也看得见，不会出现"判成内流盆地却什么都看不到"。
  *
- * ★ 一个刻意保留的**已知简化**：内流湖下游那条"幽灵河"。DEM 的填平面会翻过溢出点，所以
- *   `down` 从内流湖出去仍然有路，河网里就还留着一条**没有水量**的出湖河。
- *   要根治得把内流湖当**汇**重算 `accum` 与河网（`M33 入海率`才会真的 < 100%）——
- *   那是独立的一步，见 docs/hydro-layer.md §7。
+ * ★ 原先的"已知简化"（内流湖下游那条**幽灵出湖河**）已由 **H4.5** 根治：
+ *   DEM 的填平面会翻过溢出点，所以只做上面两步的话 `down` 从内流湖出去仍然有路，
+ *   河网里会留一条**没有水量**的出湖河，`M33 入海率`因此恒为 100%。
+ *   根治办法是把内流盆地当**汇**重算 `accum` 与河网 —— 见 `blockSinks` 与 `computeHydrology`
+ *   的迭代段。截断单独用一个开关（`CONFIG.hydro.endorheicAsSink`），可以单独回退 / A/B 对照。
  */
 function findLakes(tiles, adj, filled, depth, runoff, accum, w) {
   const n = tiles.length;
@@ -1549,11 +1572,64 @@ function findLakes(tiles, adj, filled, depth, runoff, accum, w) {
 }
 
 /**
+ * ★ H4.5：把内流盆地当**汇** —— 清空这些格子的 MFD 出边权重（返回新对象，不改入参）。
+ *
+ * ■ 为什么要这一步（设计书 §4.10 的伪代码缺的就是它）
+ *   Priority-Flood 会把洼地填到"水能流出去"，所以 `filled` 在内流湖的溢出点**之外仍然更低**，
+ *   于是 `down` 从内流湖出去仍有路 —— 河网里就留着一条**没有水量**的出湖河
+ *   （视觉上：盐湖边上流出一条河），`M33 入海率`也因此恒为 100%
+ *   —— 而 M33 的定义是"**最终入海**的河格 / 全部河格"。
+ *
+ * ■ 怎么做（最小改动：不动 CSR 结构，只把权重清零）
+ *   · 权重清零后 `accumulate` 不再往下游发水（× 0），`mainDownstream` 自然返回 −1
+ *     （它的 bestP 初值就是 0，`prob > 0` 一次都不成立）—— 这两处一行都不用改；
+ *   · 只清**内流湖格**的出边，湖外的入边原样保留 → 上游照样流进湖里；
+ *   · 外流湖的出边不动（多余的水从溢出点流走，这正是"外流"的定义）。
+ *
+ * ■ 为什么是"迭代"而不是算一次就完
+ *   截断只减少**下游**的 accum，所以内流湖自己的入流基本不变；
+ *   但"上游还有内流湖"的那些湖入流会变小 → 水位更低 → 更容易变成新的内流湖。
+ *   于是内流集合**单调扩张**（只会 false → true，不会反向）→ 必然收敛，不会振荡。
+ *   实测 1 轮即稳。
+ */
+function blockSinks(w, lakeId, lakes) {
+  let any = false;
+  for (let i = 0; i < lakes.length; i++) if (lakes[i].isEndorheic) { any = true; break; }
+  if (!any) return null;                          // 一个内流湖都没有（例如 potentialEvaporation = 0）
+  const prob = w.prob.slice();                    // 不改入参：流权重是共享结构
+  let cleared = 0;
+  for (let x = 0; x < lakeId.length; x++) {
+    const id = lakeId[x];
+    if (id < 0 || !lakes[id].isEndorheic) continue;
+    for (let j = w.start[x]; j < w.start[x + 1]; j++) { prob[j] = 0; cleared++; }
+  }
+  if (cleared === 0) return null;
+  return { w: { start: w.start, target: w.target, prob }, cleared };
+}
+
+/** 内流集合是否与上一轮相同（相同 ⇒ 截断结果自洽，可以停）。 */
+function sameSinkSet(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i].isEndorheic !== b[i].isEndorheic) return false;
+  return true;
+}
+
+/**
  * 水文总装：把上面几步串起来，结果挂到 world.hydro（契约见设计稿 §6.1）。
  *
  * 数据层是纯函数式的 —— 输入只有 tiles（海拔/湿度/温度），输出一个新对象，
  * 不改 tile 上任何字段（`isRiver` 放在 hydro 里而不是 tile.isRiver 上，
  * 就是为了保住「河是覆盖层、不是地表属性」这条分层）。
+ *
+ * ■ H4.5 的两遍（★ 设计稿 §4.10 的伪代码缺的就是第二步）
+ *   第一遍：填平 → 流权重 → 汇水累积 → 河网提取 → 湖泊判定（H4 的湖面水量平衡）；
+ *   第二遍：把判成**内流**的盆地当汇（清空它们的出边）→ 重算 汇水 / 主下游 / 河网 / 湖泊 →
+ *           直到内流集合不再扩张（单调扩张 ⇒ 必然收敛，实测 1 轮）。
+ *   开关 `CONFIG.hydro.endorheicAsSink`：false + refresh() = 回到 H4 的状态（幽灵出湖河回来），
+ *   所以这一步可以单独体验、单独回退。
+ *
+ * ■ 输出统计口径：`sinkRounds` = 截断迭代轮数，`sinkBlocked` = 被清零的出边条数
+ *   （它 > 0 才说明"水真的被内流盆地拦住了"，是 H4.5 生效的直接证据）。
  */
 function computeHydrology(tiles) {
   const t0 = performance.now();
@@ -1561,8 +1637,8 @@ function computeHydrology(tiles) {
 
   const adj = buildAdjacency(tiles);
   const filled = priorityFlood(tiles, adj);
-  const w = flowWeights(tiles, adj, filled);
-  const down = mainDownstream(n, w);
+  let w = flowWeights(tiles, adj, filled);
+  let down = mainDownstream(n, w);
 
   const runoff = new Float64Array(n);
   let landCount = 0, runoffSum = 0;
@@ -1573,23 +1649,43 @@ function computeHydrology(tiles) {
   }
   const unit = landCount > 0 ? runoffSum / landCount : 0;   // 一格"平均湿地"贡献的水量
 
-  const accum = accumulate(filled, w, runoff);
+  const order = buildFlowOrder(filled);            // 拓扑序只依赖 filled → H4.5 的迭代里复用
+  let accum = accumulate(filled, w, runoff, order);
   const depth = new Float64Array(n);
   for (let i = 0; i < n; i++) depth[i] = filled[i] - tiles[i].elevation;
 
-  const { isRiver, isSource, isMouth, count: riverCount, pruned } =
-    extractRivers(tiles, adj, filled, accum, unit, down);
+  let river = extractRivers(tiles, adj, filled, accum, unit, down);
   // ★ H4：findLakes 现在还要做**湖面水量平衡**，所以需要 `w`（按 MFD 分流比例算入流）
-  const { lakeId, lakes } = findLakes(tiles, adj, filled, depth, runoff, accum, w);
+  let { lakeId, lakes } = findLakes(tiles, adj, filled, depth, runoff, accum, w);
+
+  // ---- ★ H4.5：内流盆地当**汇** —— 迭代截断，直到内流集合不再扩张 ----
+  // 每轮成本 ≈ 一次 accum（已复用拓扑序）+ 一次河网提取 + 一次湖泊判定。
+  let sinkRounds = 0, sinkBlocked = 0;
+  if (CONFIG.hydro.endorheicAsSink) {
+    for (let r = 0; r < 5; r++) {                 // 5 是安全上限；内流集合单调扩张 ⇒ 必然收敛
+      const blocked = blockSinks(w, lakeId, lakes);
+      if (!blocked) break;
+      w = blocked.w; sinkBlocked = blocked.cleared;
+      down = mainDownstream(n, w);
+      accum = accumulate(filled, w, runoff, order);
+      river = extractRivers(tiles, adj, filled, accum, unit, down);
+      const again = findLakes(tiles, adj, filled, depth, runoff, accum, w);
+      const stable = sameSinkSet(lakes, again.lakes);
+      lakeId = again.lakeId; lakes = again.lakes;
+      sinkRounds++;
+      if (stable) break;                          // 内流集合没变 → 再截断也不会有新结果
+    }
+  }
 
   return {
     adj, filled, depth, runoff, accum,
     w, down,
-    isRiver, isSource, isMouth,                      // 玩法接口：河道 / 河源 / 河口
+    isRiver: river.isRiver, isSource: river.isSource, isMouth: river.isMouth,   // 玩法接口
     lakeId, lakes,
     unit,                                            // 陆地平均产流（"等效格数"的除数）
-    riverCount,
-    pruned,                                          // 剪枝统计（断头河 / 孤立河点各删了多少）
+    riverCount: river.count,
+    pruned: river.pruned,                            // 剪枝统计（断头河 / 孤立河点各删了多少）
+    sinkRounds, sinkBlocked,                         // ★ H4.5：截断轮数 / 被清零的出边条数
     ms: +(performance.now() - t0).toFixed(1),        // 数据层耗时（调参时看这个）
   };
 }
@@ -2173,7 +2269,8 @@ const world = {
    *   down     Int32Array     主下游（argmax 权重）；-1 = 入海 / 内流终点
    *   isRiver  Uint8Array     1 = 该格有河道穿过（★ 放在 hydro 里，不是 tile 上）
    *   isSource Uint8Array     1 = 河源（有河、无上游河格）
-   *   isMouth  Uint8Array     1 = 河口（有河、主下游是海洋）
+   *   isMouth  Uint8Array     1 = 河的**终点**（有河、`down < 0` 或主下游是海洋）。★ H4.5：
+ *                           终点里也含**内流盆地**（河在此终止但不入海），入海口径看 M33 / HUD"入湖口"
    *   lakeId   Int32Array     -1 = 非湖；否则湖泊编号
    *   lakes    []             湖泊属性表 { id, area, depthMean, depthMax, spillLevel,
    *                                         level, outlet, inflow, outflow, isEndorheic }
@@ -2236,9 +2333,15 @@ function updateHud(tile) {
   if (hy) {
     const i = tile.index;
     const eq = hy.unit > 0 ? hy.accum[i] / hy.unit : 0;
+    const lid = hy.lakeId[i];               // ★ H4.5 起水系行（入湖口）与湖行都要用它，所以提前取
     let text = `${eq.toFixed(1)} 格`;
-    if (hy.isRiver[i]) text += hy.isSource[i] ? ' · 河源' : (hy.isMouth[i] ? ' · 河口' : ' · 河道');
-    const lid = hy.lakeId[i];
+    if (hy.isRiver[i]) {
+      // ★ H4.5：`isMouth` 是"河的**终点**"（含内流盆地），所以入海/入盆地带在 HUD 上分开写 ——
+      //   内流盆地是"河在这里停住，但水不入海"（入海率另见 M33）。
+      if (hy.isSource[i]) text += ' · 河源';
+      else if (hy.isMouth[i]) text += (lid >= 0 && hy.lakes[lid].isEndorheic) ? ' · 入湖口' : ' · 河口';
+      else text += ' · 河道';
+    }
     if (lid >= 0) {
       // ★ H4：湿面积/洼地面积、渲染分档（浅湖/深湖/盐湖）与湖深。
       //   `wetArea/basinArea` 不相等是正常的 —— 内流盆地的干底也是盆地（见 findLakes 注释）。
@@ -2841,13 +2944,19 @@ function runSelfTest(tiles) {
     check('filled 沿主下游严格递减（构造上不可能成环）',
       monoOK, monoOK ? '无环' : `图块 ${monoBad} → ${hy.down[monoBad]}`);
 
-    // 每个陆地格都必须有下游 —— 否则说明存在"陆地洼地"，填平漏了
-    let landNoDown = 0;
-    for (const t of tiles) if (t.elevation > CONFIG.seaLevel && hy.down[t.index] < 0) landNoDown++;
-    check('每个陆地格都有主下游（ε 保证不存在陆地洼地）', landNoDown === 0, `${landNoDown} 格无下游`);
+    // ★ H4.5 起口径修正：内流盆地格的 down = −1 是**正确的**（水到湖为止，这正是"汇"），
+    //   所以「陆地格必有下游」要排掉它们，而「走到哪里」的终点是"海 **或** 内流盆地"。
+    const isSinkCell = (i) => { const id = hy.lakeId[i]; return id >= 0 && hy.lakes[id].isEndorheic; };
+    let landNoDown = 0, sinkNoDown = 0;
+    for (const t of tiles) {
+      if (t.elevation <= CONFIG.seaLevel || hy.down[t.index] >= 0) continue;
+      if (isSinkCell(t.index)) sinkNoDown++; else landNoDown++;
+    }
+    check('非内流盆地的陆地格都有主下游（ε 保证不存在陆地洼地）', landNoDown === 0,
+      `${landNoDown} 格无下游｜内流盆地（汇）${sinkNoDown} 格 down = −1 属正常`);
 
-    // 可达性：从所有水域沿「反向 down 链」扩散，应当覆盖全部陆地格。
-    // 这一条同时排除了"水在半路卡住"，是 M15（孤立河点）与"必须能入海"的根。
+    // 可达性：从所有**汇**（海洋 + 内流盆地）沿「反向 down 链」扩散，应当覆盖全部陆地格。
+    // 这一条同时排除了"水在半路卡住"，是 M15（孤立河点）与"必须能到终点"的根。
     {
       const head = new Int32Array(n).fill(-1);
       const next = new Int32Array(n).fill(-1);
@@ -2857,13 +2966,15 @@ function runSelfTest(tiles) {
       }
       const reach = new Uint8Array(n);
       const queue = [];
-      for (const t of tiles) if (t.elevation <= CONFIG.seaLevel) { reach[t.index] = 1; queue.push(t.index); }
+      for (const t of tiles) {
+        if (t.elevation <= CONFIG.seaLevel || isSinkCell(t.index)) { reach[t.index] = 1; queue.push(t.index); }
+      }
       for (let qi = 0; qi < queue.length; qi++) {
         for (let e = head[queue[qi]]; e >= 0; e = next[e]) if (!reach[e]) { reach[e] = 1; queue.push(e); }
       }
       let unreached = 0;
       for (const t of tiles) if (t.elevation > CONFIG.seaLevel && !reach[t.index]) unreached++;
-      check('每个陆地格都能沿主下游走到海洋', unreached === 0, `${unreached} 格走不到`);
+      check('每个陆地格都能沿主下游走到汇（海 或 内流盆地）', unreached === 0, `${unreached} 格走不到`);
     }
 
     // 断头河 = 0 / 孤立河点 = 0（★ 由 extractRivers 的两步剪枝**构造保证**）
@@ -3043,6 +3154,49 @@ function runSelfTest(tiles) {
         riverInLake > 0 && rs.lakeBreaks > 0 && rs.lineCells === riverTotal - riverInLake,
         `${riverTotal} 河格 − ${riverInLake} 湖面河格 = ${rs.lineCells} 个画线格 · ` +
         `${rs.lakeBreaks} 条链收口在湖岸`);
+    }
+
+    // ---- ★ H4.5：内流盆地当"汇"（开关关掉时这两条不检查 —— 那是回退状态）----
+    if (CONFIG.hydro.endorheicAsSink) {
+      // ① 内流盆地格**一个出边都不能有**（否则就是那条"没有水量的出湖河"）
+      let sinkWithOutflow = 0;
+      for (let i = 0; i < tiles.length; i++) {
+        const id = hyl.lakeId[i];
+        if (id < 0 || !lks[id].isEndorheic) continue;
+        if (hyl.down[i] >= 0) sinkWithOutflow++;
+      }
+      check('H4.5 内流盆地是汇（出边已清空，没有幽灵出湖河）',
+        sinkWithOutflow === 0 && hyl.sinkBlocked > 0,
+        `${hyl.sinkBlocked} 条出边被清零 · 截断 ${hyl.sinkRounds} 轮 ·` +
+        ` 仍有出边的盆地格 ${sinkWithOutflow} 个`);
+
+      // ② 入海率（M33）：沿主下游一路追到海才算"入海"；追到 down = −1 = 进了内流盆地。
+      //    这条断言允许 sinkRiverCount = 0（那种参数下没有河进内流盆地，入海率本来就是 100%）。
+      const toSea = new Int8Array(tiles.length).fill(-1);
+      let seaCount = 0, sinkRiverCount = 0, maxChain = 0;
+      for (const t of tiles) {
+        if (!hyl.isRiver[t.index]) continue;
+        const path = [];
+        let cur = t.index, ans = -1;
+        while (cur >= 0) {
+          if (toSea[cur] >= 0) { ans = toSea[cur]; break; }          // 续上已经算过的
+          path.push(cur);
+          const d = hyl.down[cur];
+          if (d < 0) { ans = 0; break; }                             // 终点（内流盆地）
+          if (tiles[d].elevation <= CONFIG.seaLevel) { ans = 1; break; }   // 入海
+          cur = d;
+        }
+        if (ans < 0) ans = 0;
+        for (const p of path) toSea[p] = ans;
+        if (ans) seaCount++; else sinkRiverCount++;
+        if (path.length > maxChain) maxChain = path.length;
+      }
+      const riverTotal2 = seaCount + sinkRiverCount;
+      const seaRate = riverTotal2 > 0 ? +(seaCount / riverTotal2 * 100).toFixed(1) : 100;
+      check('H4.5 入海率 < 100%（有的河最终进了内流盆地）',
+        sinkRiverCount === 0 || seaRate < 100,
+        `${seaRate}%（入海 ${seaCount} / 河格 ${riverTotal2}）· 进内流盆地 ${sinkRiverCount} 格` +
+        ` · 最长追踪链 ${maxChain} 格`);
     }
   }
 

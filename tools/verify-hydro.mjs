@@ -101,13 +101,13 @@ const env = await evaluate(`(() => {
   if (!P) return { ok: false, why: '没有 __PLANET__' };
   const h = P.CONFIG.hydro;
   if (!h) return { ok: false, why: 'CONFIG.hydro 缺失（H2 之前）' };
-  for (const k of ['runoffExponent','fillEpsilon','flowExponent','riverCellThreshold','minLakeDepth','minLakeArea','potentialEvaporation']) {
+  for (const k of ['runoffExponent','fillEpsilon','flowExponent','riverCellThreshold','minLakeDepth','minLakeArea','potentialEvaporation','endorheicAsSink']) {
     if (h[k] === undefined) return { ok: false, why: 'CONFIG.hydro.' + k + ' 缺失' };
   }
   if (P.CONFIG.riverWidth !== undefined) return { ok: false, why: 'CONFIG.riverWidth 不该存在（H1 已删，河不再是群系）' };
   const hy = P.hydro();
   if (!hy) return { ok: false, why: 'world.hydro 仍为 null（H2 没接进 recomputeTerrain）' };
-  for (const k of ['adj','filled','depth','runoff','accum','w','down','isRiver','isSource','isMouth','lakeId','lakes','unit','pruned']) {
+  for (const k of ['adj','filled','depth','runoff','accum','w','down','isRiver','isSource','isMouth','lakeId','lakes','unit','pruned','sinkRounds','sinkBlocked']) {
     if (hy[k] === undefined) return { ok: false, why: 'hydro.' + k + ' 缺失' };
   }
   // 分层守卫：河必须只活在 hydro 覆盖层里，不许写回 tile
@@ -117,6 +117,8 @@ const env = await evaluate(`(() => {
   return {
     ok: true, level: P.CONFIG.level, seed: P.CONFIG.seed, n: P.tiles.length,
     hydroMs: hy.ms, pruned: hy.pruned,
+    // ★ H4.5：内流盆地当"汇"的截断统计（sinkBlocked > 0 才说明水真的被内流盆地拦住了）
+    sinkRounds: hy.sinkRounds, sinkBlocked: hy.sinkBlocked, endorheicAsSink: h.endorheicAsSink,
     hydro: { runoffExponent: h.runoffExponent, fillEpsilon: h.fillEpsilon,
       flowExponent: h.flowExponent, riverCellThreshold: h.riverCellThreshold,
       minLakeDepth: h.minLakeDepth, minLakeArea: h.minLakeArea,
@@ -128,6 +130,8 @@ if (!env.ok) throw new Error(`页面状态不对：${env.why}（先关掉残留�
 console.log(`页面就绪：level=${env.level} seed=${env.seed} 图块 ${env.n} 个`);
 console.log(`水文数据层耗时：${env.hydroMs} ms（整条地形链 ${env.build.terrainMs} ms，其中打包几何体 ${env.build.geometryMs} ms）`);
 console.log(`剪枝：断头河删 ${env.pruned.deadEnds} 格 · 孤立河点删 ${env.pruned.isolated} 格`);
+console.log(`★ H4.5 内流盆地当"汇"：` +
+  (env.endorheicAsSink ? `截断 ${env.sinkRounds} 轮 · 清零出边 ${env.sinkBlocked} 条` : '已关闭（endorheicAsSink = false）'));
 
 /* ---------- 页面内一次性算完所有指标 ---------- */
 const S = await evaluate(`(() => {
@@ -253,27 +257,64 @@ const S = await evaluate(`(() => {
   const depthHist = bins.map((b) => { let c = 0; for (let i = 0; i < n; i++) if (hy.depth[i] > b) c++; return c; });
 
   /* --- 不变量（脚本自己独立再验一遍，不只依赖页面自测） --- */
-  let geOK = true, monoOK = true, landNoDown = 0, runoffSum = 0, sinkSum = 0;
+  /* ★ H4.5：内流盆地格的 down = −1 是**正确的**（水到湖为止），不能算"走不到海"的错误。
+     所以先把它们标出来：可达性从「海 + 内流盆地」一起扩散，缺的才是真问题。 */
+  const endorheicCells = new Uint8Array(n);
+  let endorheicCellCount = 0;
+  for (let i = 0; i < n; i++) {
+    const id = hy.lakeId[i];
+    if (id >= 0 && lks[id] && lks[id].isEndorheic) { endorheicCells[i] = 1; endorheicCellCount++; }
+  }
+  let geOK = true, monoOK = true, landNoDown = 0, sinkLandNoDown = 0, sinkOutflow = 0,
+    runoffSum = 0, sinkSum = 0;
   for (let i = 0; i < n; i++) {
     if (hy.filled[i] < tiles[i].elevation - 1e-9) geOK = false;
     const d = hy.down[i];
     if (d >= 0 && !(hy.filled[d] < hy.filled[i])) monoOK = false;
-    if (tiles[i].elevation > seaLevel && d < 0) landNoDown++;
+    if (tiles[i].elevation > seaLevel && d < 0) {
+      if (endorheicCells[i]) sinkLandNoDown++; else landNoDown++;
+    }
+    if (endorheicCells[i] && d >= 0) sinkOutflow++;   // ★ H4.5：内流盆地必须一个出边都没有
     runoffSum += hy.runoff[i];
     if (d < 0) sinkSum += hy.accum[i];
   }
-  // 可达性：从所有水域沿\"反向 down 链\"扩散，应覆盖全部陆地格
+  // 可达性：从所有**汇**（海洋 + 内流盆地）沿"反向 down 链"扩散，应覆盖全部陆地格
   let unreachedLand = 0;
   {
     const h2 = new Int32Array(n).fill(-1), n2 = new Int32Array(n).fill(-1);
     for (let x = 0; x < n; x++) { const d = hy.down[x]; if (d >= 0) { n2[x] = h2[d]; h2[d] = x; } }
     const reach = new Uint8Array(n), queue = [];
-    for (let i = 0; i < n; i++) if (tiles[i].elevation <= seaLevel) { reach[i] = 1; queue.push(i); }
+    for (let i = 0; i < n; i++) if (tiles[i].elevation <= seaLevel || endorheicCells[i]) { reach[i] = 1; queue.push(i); }
     for (let qi = 0; qi < queue.length; qi++) {
       for (let e = h2[queue[qi]]; e >= 0; e = n2[e]) if (!reach[e]) { reach[e] = 1; queue.push(e); }
     }
     for (let i = 0; i < n; i++) if (tiles[i].elevation > seaLevel && !reach[i]) unreachedLand++;
   }
+  /* ★ M33 口径（设计书 §8.1）："**最终入海**的河格 / 全部河格"。
+     沿主下游一路追：追到海格 = 入海；追到 down = −1 = 进了内流盆地（不入海）。
+     H4 里内流盆地还有出边，所以那时候这个数恒 100%；H4.5 清掉出边后才真的 < 100%。 */
+  let seaRiver = 0, sinkRiver = 0, seaMaxChain = 0;
+  {
+    const toSea = new Int8Array(n).fill(-1);
+    for (let i = 0; i < n; i++) {
+      if (!isR[i]) continue;
+      const path = [];
+      let cur = i, ans = -1;
+      while (cur >= 0) {
+        if (toSea[cur] >= 0) { ans = toSea[cur]; break; }             // 续上已经算过的
+        path.push(cur);
+        const d = hy.down[cur];
+        if (d < 0) { ans = 0; break; }                                // 终点（内流盆地）
+        if (tiles[d].elevation <= seaLevel) { ans = 1; break; }       // 入海
+        cur = d;
+      }
+      if (ans < 0) ans = 0;
+      for (const p of path) toSea[p] = ans;
+      if (ans) seaRiver++; else sinkRiver++;
+      if (path.length > seaMaxChain) seaMaxChain = path.length;
+    }
+  }
+  const seaRate = V > 0 ? +(seaRiver / V * 100).toFixed(2) : 100;
   const conserveRel = runoffSum > 0 ? Math.abs(sinkSum - runoffSum) / runoffSum : 0;
 
   /* --- 干湿分异：雨林 vs 沙漠的河网密度（P0-2「沙漠里天然无河」） --- */
@@ -406,7 +447,9 @@ const S = await evaluate(`(() => {
     invariants: {
       degEquals2E: degSum === P.triToTile.length,
       filledGeElevation: geOK, downstreamStrictlyLower: monoOK,
-      landAllHaveDown: landNoDown === 0, unreachedLand,
+      landAllHaveDown: landNoDown === 0, sinkLandNoDown, sinkOutflow, unreachedLand,
+      endorheicCells: endorheicCellCount,
+      seaRiver, sinkRiver, seaRate, seaMaxChain,
       conservationRel: +conserveRel.toExponential(2),
       runoffSum: +runoffSum.toFixed(2), sinkSum: +sinkSum.toFixed(2),
     },
@@ -423,7 +466,8 @@ const R = S.rivers, I = S.invariants, RV = S.river;
 const checks = [
   // ---- 河网拓扑（★ 口径已改写，理由见文件头） ----
   ['M12 流图环数 = 0（河道不相交）',   R.flowCycles === 0,      `${R.flowCycles} 个｜v1 口径（格邻接）是 126 个闭环`],
-  ['M13 河网可达性 = 100%（必达河口）', R.reachMouthPct === 100, `${R.reachMouthPct}%（${R.V} 个河格全部顺主下游可达河口）`],
+  ['M13 河网可达性 = 100%（每个河格都顺主下游走到终点）', R.reachMouthPct === 100,
+    `${R.reachMouthPct}%（${R.V} 个河格，终点 = 入海 或 入内流盆地）｜★ H4.5 起"入海"另算，见 M33`],
   ['M14 最大汇水面积（陆地格）≥ 200 等效格', R.maxAccumEqLand >= 200, `${R.maxAccumEqLand} 等效格（河格口径 ${R.maxAccumEqRiver}）｜最大流图水系 ${R.flowLargest} 格`],
   ['M15 孤立河点 = 0',                 R.isolated === 0,        `${R.isolated} 个｜v1 口径 13.0%`],
   ['M15b 断头河 = 0',                  R.deadEnds === 0,        `${R.deadEnds} 个｜v1 口径 31.9%`],
@@ -435,8 +479,12 @@ const checks = [
   ['定理 Σdeg = 2E（邻接表与三角形数一致）', I.degEquals2E, `${S.degSum} / 三角形 ${S.triangleCount}`],
   ['定理 filled ≥ elevation',          I.filledGeElevation, 'Priority-Flood 的 max() 保证'],
   ['定理 下游严格递减（不可能成环）',    I.downstreamStrictlyLower, '每步 +fillEpsilon'],
-  ['定理 陆地格必有主下游（无陆地洼地）', I.landAllHaveDown, 'ε 填平后处处有下坡'],
-  ['定理 每个陆地格都能走到海洋',        I.unreachedLand === 0, `走不到 ${I.unreachedLand} 格`],
+  // ★ H4.5 起口径修正：内流盆地格的 down = −1 是**正确的**（水到湖为止，这正是"汇"），
+  //   所以这两条定理里的"陆地格"都排掉内流盆地格，且终点是"海 **或** 内流盆地"。
+  ['定理 非内流盆地的陆地格必有主下游', I.landAllHaveDown,
+    `ε 填平后处处有下坡｜内流盆地（汇）${I.sinkLandNoDown} 格 down = −1 属正常`],
+  ['定理 每个陆地格都能走到汇（海 或 内流盆地）', I.unreachedLand === 0,
+    `走不到 ${I.unreachedLand} 格｜汇 = 海洋 + ${I.endorheicCells} 个内流盆地格`],
   ['定理 水量守恒（相对误差 < 1e-6）',   parseFloat(I.conservationRel) < 1e-6,
     `产流 ${I.runoffSum} vs 终点 ${I.sinkSum}（相对误差 ${I.conservationRel}）`],
   ['M17 湖泊数 ≥ 15（★ 口径已改写，理由见文件头）', S.lakes.count >= 15,
@@ -467,13 +515,33 @@ const checks = [
     RV ? `各级格数 ${RV.strahlerCounts.join('/')} → Rb ${RV.bifurcation.join('/')}` : '未取到'],
   ['M32 河宽沿主下游不明显收腰（最大回缩 ≤ 25%）', RV && RV.maxWidthDipRel <= 0.25,
     RV ? `${RV.widthDips} 处回缩（占河格 ${(RV.widthDips / Math.max(1, R.V) * 100).toFixed(1)}%）｜最大幅度 ${(100 * RV.maxWidthDipRel).toFixed(1)}%` : '未取到'],
-  ['M33 入海率 ≥ 70%', R.reachMouthPct >= 70,
-    `${R.reachMouthPct}%（★ H4 已判定出内流盆地，但河网仍是 DEM 的填平面 —— ` +
-    `内流湖那条"幽灵出湖河"还没掐掉，所以仍是 100%；把内流湖当**汇**重算 accum 之后这个数才会 <100%）`],
+  // ★ H4.5 把 M33 的口径按设计书 §8.1 修正为"**最终入海**的河格 / 全部河格" ——
+  //   旧实现把"到达任意终点（含内流盆地）"都算成入海，于是恒为 100%，等于没测。
+  ['M33 入海率（最终入海的河格占比）≥ 70%', I.seaRate >= 70,
+    `${I.seaRate}%（入海 ${I.seaRiver} / 河格 ${R.V} · 进内流盆地 ${I.sinkRiver}）｜` +
+    `旧口径"可达任意终点" ${R.reachMouthPct}%（构造上恒 100%，已不作判据）`],
   ['M35 河网不像六边形折线（格网指纹 ≤ 40%）', RV && RV.gridFingerprintPct <= 40,
     RV ? `平滑后 ${RV.gridFingerprintPct}% ｜ 只有抖动、未平滑时 ${RV.gridFingerprintRawPct}%（直行段占 ${RV.gridStraightPct}%，已剔除）` : '未取到'],
   ['M37 河宽与汇水面积单调相关（Spearman ≥ 0.9）', RV && RV.spearman >= 0.9,
     RV ? `ρ = ${RV.spearman}` : '未取到'],
+
+  // ---- ★ H4.5：内流盆地当"汇"（根治"幽灵出湖河"）----
+  ['H4.5 内流盆地是汇（盆地格一个出流都没有）',
+    !env.endorheicAsSink || (I.sinkOutflow === 0 && I.endorheicCells > 0 && I.sinkLandNoDown > 0),
+    env.endorheicAsSink
+      ? `${I.sinkOutflow} 个盆地格仍有出流｜盆地格 ${I.endorheicCells} 个 · ` +
+        `${I.sinkLandNoDown} 格 down = −1 · 清零出边 ${env.sinkBlocked} 条`
+      : '已按 CONFIG 关闭（回退状态，幽灵出湖河会回来）'],
+  ['H4.5 截断迭代已收敛（1–5 轮）',
+    !env.endorheicAsSink || (env.sinkRounds >= 1 && env.sinkRounds <= 5 && env.sinkBlocked > 0),
+    env.endorheicAsSink
+      ? `${env.sinkRounds} 轮 · ${env.sinkBlocked} 条出边 · 数据层 ${env.hydroMs} ms`
+      : '已按 CONFIG 关闭'],
+  ['H4.5 河网不再从内流盆地流出（入海率 < 100%，除非没有河进盆地）',
+    !env.endorheicAsSink || I.sinkRiver === 0 || I.seaRate < 100,
+    env.endorheicAsSink
+      ? `${I.seaRate}% 入海｜进内流盆地 ${I.sinkRiver} 格 · 最长追踪链 ${I.seaMaxChain} 格`
+      : '已按 CONFIG 关闭'],
 ];
 let fail = 0;
 console.log('');

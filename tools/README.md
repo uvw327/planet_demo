@@ -33,7 +33,7 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 | `lab-hydro.mjs` | **河网扫参实验室**：一次加载内扫 `riverCellThreshold × flowExponent × runoffExponent`（默认 54 组），输出**两套图论口径**（流图 / 格邻接）+ 密度/汇水/海拔/度分布表（含湖数/内流数），写 `tools/out/lab-hydro.json` | `node tools/lab-hydro.mjs`<br>`$env:HY_T='3,5,8,12'; node tools/lab-hydro.mjs` |
 | `lab-lake.mjs` | **★ H4 湖泊标定实验室**：一次加载内扫 `potentialEvaporation × minLakeArea × minLakeDepth`（默认 56 组），输出湖数 / 内流数 / **干底盆地数** / **小水洼数**（设计书 §10.1 的过水段污染度）/ 最大湖 / 分档 / **断湖链数**，写 `tools/out/lab-lake.json`。★ `potentialEvaporation` 是内流盆地数量的唯一旋钮，但它对 M18 是**弱识别**的（`PE ∈ [0.5,8]` 都能落进 5–25），所以真锚是**物理量级**（见 `docs/hydro-layer.md` §7.2） | `node tools/lab-lake.mjs`<br>`$env:LK_PE='1,2,4'; node tools/lab-lake.mjs` |
 | `lab-hydro-map.mjs` | **河网形状诊断**：把河网**正交投影**成一张 2D 图（灰绿=陆地 · 暗青=湖 · 亮蓝=河道，线宽 ∝ `accum^0.42`），直接看是"树枝"还是"糊片"。**不需要三维渲染，几秒出图** —— H2 唯一"看得见"的证据 | `node tools/lab-hydro-map.mjs`<br>`node tools/lab-hydro-map.mjs --t 20 --f 1.4` |
-| `shot-river.mjs` | **H3 + H4 截图**（7 组）：全球 4 视角 / 「只留河线」2 视角 / 聚焦主干（远·近·近只留河线）/ **宽度-流量散点**（页内 canvas）/ `climateCoupling` 0-1 对照 / **阈值 T=12·20·30 同视角对照** / **★ H4 湖泊**（清单图 / 只留湖面 / 最大湖近景 / **开关同机位对照** / 盐湖近景） | `node tools/shot-river.mjs` |
+| `shot-river.mjs` | **H3 + H4 + H4.5 截图**（8 组）：全球 4 视角 / 「只留河线」2 视角 / 聚焦主干（远·近·近只留河线）/ **宽度-流量散点**（页内 canvas）/ `climateCoupling` 0-1 对照 / **阈值 T=12·20·30 同视角对照** / **★ H4 湖泊**（清单图 / 只留湖面 / 最大湖近景 / **开关同机位对照** / 盐湖近景）/ **★ H4.5 幽灵出湖河开关对照**（`endorheicAsSink` off→on 同机位两张，选点用**两态 diff**：先各跑一次 `refresh()`，把"关时有河、开时没河"的格子 diff 出来，再取连到内流盆地最多幽灵河格的那个） | `node tools/shot-river.mjs` |
 | `table-check.mjs` | markdown 表格列数自检（改完文档跑一遍） | `node tools/table-check.mjs docs/v1-biome-globe-review.md` |
 
 ## ⚠️ 七个已经踩过的坑（新脚本请照抄防护）
@@ -168,5 +168,5 @@ H3 起星球三角形仍是 245760，**河网是独立几何体**（18518 三角
 - `shot-terrain.mjs` → `docs/terrain-shots/candidates/`
 - `shot-orogeny.mjs` → `docs/orogeny-shots/`（全球 6 + 山地隔离 4 + 聚焦 6）
 - `lab-hydro-map.mjs` → `docs/hydro-shots/`（河网形状诊断 2D 图）
-- `shot-river.mjs` → `docs/river-shots/`（全球 4 + 只留河线 2 + 聚焦 3 + 宽度散点 1 + 气候耦合 2 + 阈值对照 3 + **H4 湖泊 6**）
+- `shot-river.mjs` → `docs/river-shots/`（全球 4 + 只留河线 2 + 聚焦 3 + 宽度散点 1 + 气候耦合 2 + 阈值对照 3 + **H4 湖泊 6** + **H4.5 开关对照 2**）
 - `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` / `verify-hydro.mjs` / `lab-hydro.mjs` / `lab-lake.mjs` / `shot-river.mjs` → `tools/out/*.json`（`tools/out/` 不入库）

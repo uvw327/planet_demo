@@ -127,6 +127,12 @@
 > 想自己验"湖面真的走顶点色"：`setVisibleBiomes(['__lake__'])` 能把它刷掉，
 > 而河网（独立几何体）刷不掉 —— 见 `docs/river-shots/lake-only-a000.png`。
 
+> **★ H4.5 起（2026-10-17）：同样一行都没变。** H4.5 是**纯数据层**改动
+> （内流盆地格的 MFD 出边清零 → 重算 `accum` / `down` / 河网提取），渲染层只是跟着
+> `rebuildRivers()` 重跑一次 —— 还是 1 个覆盖层 Mesh，draw call **3**、Mesh **2**。
+> 渲染三角形 260912 → **260084**（河网 15152 → **14324**：少掉的 828 个就是不再画的
+> 幽灵出湖河）。开关对照图 `docs/river-shots/sink-off.png` → `sink-on.png`。
+
 > 顺带记录一个数据：`naiveFloorDiv6WrongTriangles = 245745 / 245760 = 99.994%` ——
 > 用 `Math.floor(faceIndex / 6)` 反推图块在 level 6 下**几乎全错**（12 个五边形只有 5 个三角形，
 > 会把这之后的偏移全部错位）。这正是必须显式维护 `triToTile` 的原因。

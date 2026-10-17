@@ -294,11 +294,13 @@ await allBiomes();
 await sleep(1200);
 
 /* ---------- ⑦ 湖泊与内流盆地（★ H4）----------
- * 四件证据：
- *   · lake-inventory.png —— 页内 canvas 出的**湖泊清单图**（等距圆柱投影 + 按湿面积排序的表）
- *   · lake-only.png      —— 只留湖面格（湖面是**顶点色覆盖**，0 draw call）
- *   · lake-close / lake-salt-close —— 最大湖 / 最大内流盆地的近景
- *   · lake-off.png       —— 用 setVisibleOverlays 关掉湖泊层后的同一视角（证明开关真的生效） */
+ * 六件证据：
+ *   · lake-inventory.png      —— 页内 canvas 出的**湖泊清单图**（等距圆柱投影 + 按湿面积排序的表）
+ *   · lake-only-a000.png      —— 只留湖面格（湖面是**顶点色覆盖**，0 draw call）
+ *   · lake-close / -off / -on —— 最大湖的**同机位三张**（湖在 → 消失 → 回来：开关可逆）
+ *   · lake-salt-close.png     —— 最大内流盆地的近景（灰青盐碱滩）
+ *   · sink-off / sink-on      —— ★ H4.5 内流盆地当"汇"的同机位两张
+ *                                （关：幽灵出湖河回来 → 开：那条河消失，河网断在湖岸） */
 await setRotation(0);
 await allBiomes();
 await sleep(800);
@@ -436,6 +438,71 @@ if (pick.salt) {
   await nearShot('lake-salt-close', pick.salt.cell);
   console.log(`√ 近景：最大内流盆地 #${pick.salt.id}（洼地 ${pick.salt.basin} 格 / 湿 ${pick.salt.wet} 格）`);
 }
+
+/* ★ H4.5：内流盆地当"汇"的开关对照（同机位两张）——
+   off（幽灵出湖河回来：盐湖边上流出一条河）→ on（那条河消失，河网断在湖岸）。
+   ★ 聚焦哪一格？不是"入流河最多的盆地"，而是**幽灵河最长的那个盆地** ——
+     先两态各跑一次 refresh，把"关时有河、开时没河"的格子 diff 出来（= 幽灵河格），
+     再按它们沿 down 链的终点分到各内流盆地，取格数最多的那个。
+     否则会聚焦到一个只有 2 格入流的小盆地，两张图看不出任何差别。
+   开关 = CONFIG.hydro.endorheicAsSink，所以这一步能单独体验、单独回退。 */
+const sinkPick = await evaluate(`(() => {
+  const P = window.__PLANET__, n = P.tiles.length;
+  const setState = (on) => { P.CONFIG.hydro.endorheicAsSink = on; P.refresh(); return P.hydro(); };
+  const hyOff = setState(false);
+  const offRivers = new Uint8Array(n);
+  for (let i = 0; i < n; i++) offRivers[i] = hyOff.isRiver[i];
+  const offCount = hyOff.riverCount;
+  const hyOn = setState(true);
+  const onCount = hyOn.riverCount;
+  P.setVisibleOverlays(null); P.setVisibleBiomes(null);
+
+  const ghost = new Map();                       // 每个内流盆地分到多少幽灵河格（−1 = 没分到）
+  for (let i = 0; i < n; i++) {
+    if (!offRivers[i] || hyOn.isRiver[i]) continue;
+    // ★ 幽灵河是从内流盆地**流出来**的，所以沿 down 链走会**先经过**那个盆地格，
+    //   再穿过填平面一路到海 —— 取的是**第一个**内流盆地格，不是链的终点。
+    let cur = i, hops = 0, sinkId = -1;
+    while (cur >= 0 && hops++ < 2000) {
+      const id = hyOff.lakeId[cur];
+      if (id >= 0 && hyOff.lakes[id].isEndorheic) { sinkId = id; break; }
+      cur = hyOff.down[cur];
+    }
+    ghost.set(sinkId, (ghost.get(sinkId) || 0) + 1);
+  }
+  let bestId = -1, bestCnt = 0, ghostTotal = 0;
+  for (const [id, c] of ghost) { ghostTotal += c; if (id >= 0 && c > bestCnt) { bestId = id; bestCnt = c; } }
+  if (bestId < 0) {
+    return { id: -1, cell: -1, ghost: 0, ghostTotal, offCount, onCount,
+      blocked: hyOn.sinkBlocked, rounds: hyOn.sinkRounds, dist: [...ghost.entries()] };
+  }
+  let cell = -1;
+  for (let i = 0; i < n; i++) {
+    if (hyOff.lakeId[i] !== bestId) continue;
+    if (cell < 0 || P.tiles[i].elevation < P.tiles[cell].elevation) cell = i;
+  }
+  return { id: bestId, cell, ghost: bestCnt, ghostTotal, offCount, onCount,
+    blocked: hyOn.sinkBlocked, rounds: hyOn.sinkRounds };
+})()`);
+
+if (sinkPick && sinkPick.id >= 0) {
+  const setSink = (on) => evaluate(`(() => {
+    window.__PLANET__.CONFIG.hydro.endorheicAsSink = ${on};
+    window.__PLANET__.refresh();
+    window.__PLANET__.setVisibleOverlays(null); window.__PLANET__.setVisibleBiomes(null); })()`);
+  await setSink(false);
+  await sleep(1200);
+  shots.sinkOff = await nearShot('sink-off', sinkPick.cell);
+  await setSink(true);
+  await sleep(1200);
+  shots.sinkOn = await nearShot('sink-on', sinkPick.cell);
+  console.log(`√ 近景：H4.5 开关对照（内流盆地 #${sinkPick.id}）` +
+    `｜幽灵河共 ${sinkPick.ghostTotal} 格，其中 ${sinkPick.ghost} 格连到这个盆地` +
+    `｜河格 ${sinkPick.offCount}（关）→ ${sinkPick.onCount}（开）· 清零出边 ${sinkPick.blocked} 条 · ${sinkPick.rounds} 轮收敛`);
+} else if (sinkPick) {
+  console.log(`△ H4.5 开关对照跳过：幽灵河共 ${sinkPick.ghostTotal} 格，但没有一格连到内流盆地` +
+    `（关 ${sinkPick.offCount} 格 → 开 ${sinkPick.onCount} 格｜分布 ${JSON.stringify(sinkPick.dist)}）`);
+}
 await resetZoom();
 
 /* ---------- 汇总 ---------- */
@@ -472,6 +539,13 @@ const stats = await evaluate(`(() => {
       lakeCells: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) if (hy.lakeId[i] >= 0) c++; return c; })(),
       riverCellsInLake: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) if (hy.lakeId[i] >= 0 && hy.isRiver[i]) c++; return c; })(),
       lakeBreaks: rs.lakeBreaks, lineCells: rs.lineCells,
+      // ★ H4.5：内流盆地当"汇"（sinkBlocked > 0 = 水真的被内流盆地拦住了）
+      sinkRounds: hy.sinkRounds, sinkBlocked: hy.sinkBlocked,
+      sinkCells: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) {
+        const id = hy.lakeId[i]; if (id >= 0 && hy.lakes[id].isEndorheic) c++; } return c; })(),
+      sinkRivers: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) {
+        const d = hy.down[i];
+        if (hy.isRiver[i] && d >= 0) { const id = hy.lakeId[d]; if (id >= 0 && hy.lakes[id].isEndorheic) c++; } } return c; })(),
       overlays: P.overlays(),
     },
     selfTest: selfTest ? {
@@ -494,6 +568,9 @@ console.log(`湖泊（★ H4）：${stats.lakes.count} 个（最大湿面积 ${s
   `分档 浅 ${stats.lakes.tiers.shallow}/深 ${stats.lakes.tiers.deep}/盐 ${stats.lakes.tiers.salt} · ` +
   `湖面格 ${stats.lakes.lakeCells}（其中河格 ${stats.lakes.riverCellsInLake}）· ` +
   `画线格 ${stats.lakes.lineCells} · ${stats.lakes.lakeBreaks} 条链收口在湖岸`);
+console.log(`★ H4.5 内流盆地当"汇"：清零出边 ${stats.lakes.sinkBlocked} 条 · ${stats.lakes.sinkRounds} 轮收敛 · ` +
+  `盆地格 ${stats.lakes.sinkCells} 个 · 进盆地的河格 ${stats.lakes.sinkRivers} 个` +
+  `（这些河最终不入海 → 入海率 < 100%）`);
 console.log(`生成耗时：${JSON.stringify(stats.buildTimings)}`);
 console.log(`页面自测：${stats.selfTest ? `${stats.selfTest.passed}/${stats.selfTest.total} 通过` : '（无 selfTest）'}`);
 if (stats.selfTest && stats.selfTest.failed.length) {

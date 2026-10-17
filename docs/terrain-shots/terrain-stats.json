@@ -6,10 +6,10 @@
     "level": 6,
     "tiles": 40962,
     "triangles": 245760,
-    "terrainMs": 266.6,
-    "geometryMs": 48.7,
-    "totalMs": 328.6,
-    "riverMs": 12.9
+    "terrainMs": 276,
+    "geometryMs": 50.1,
+    "totalMs": 347,
+    "riverMs": 20
   },
   "params": {
     "landFraction": 0.38,
@@ -140,7 +140,7 @@
     "hydroShell": true,
     "hydroFilled": true,
     "overlaysAPI": true,
-    "selfTestChecks": 42,
+    "selfTestChecks": 44,
     "selfTestFailed": []
   },
   "latProfile": [
@@ -252,7 +252,7 @@
   },
   "render": {
     "drawCalls": 3,
-    "triangles": 260912,
+    "triangles": 260084,
     "meshCount": 2,
     "overlayMeshes": 1,
     "geometries": 3
