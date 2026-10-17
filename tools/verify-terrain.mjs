@@ -385,6 +385,9 @@ const S = await evaluate(`(() => {
       riverTiles: bio.river || 0,
       riverFieldLeft: tiles.some((t) => t.river !== undefined),
       hydroShell: 'hydro' in P.world,
+      // ★ H2：水文数据层已填充（不再是空壳）。这里只取"有没有算出来"，
+      //   具体指标由 tools/verify-hydro.mjs 负责 —— 而且**绝不能**把 hydro() 整个回传。
+      hydroFilled: !!(P.world.hydro && P.world.hydro.riverCount !== undefined && P.world.hydro.lakes),
       overlaysAPI: typeof P.setVisibleOverlays === 'function',
       selfTestChecks: P.selfTest ? P.selfTest.rows.length : 0,
       selfTestFailed: P.selfTest ? P.selfTest.rows.filter((r) => !r.ok).map((r) => r.name) : ['selfTest 缺失'],
@@ -449,8 +452,8 @@ const checks = [
   ['群系种类 ≥ 11（河流已移出群系）',   S.kinds >= 11,                                        `${S.kinds} 种（M19 目标 ≥15，待后续阶段补真群系）`],
   ['H1 群系表中已无河流',             !S.h1.riverBiomePresent && S.h1.riverTiles === 0 && !S.h1.riverFieldLeft,
     `BIOME=${S.h1.riverBiomePresent ? '仍有 river' : '无'} 河网格子=${S.h1.riverTiles} 残留字段=${S.h1.riverFieldLeft}`],
-  ['H1 world.hydro 空壳 + 覆盖层 API 就位', S.h1.hydroShell && S.h1.overlaysAPI,
-    `hydro=${S.h1.hydroShell} setVisibleOverlays=${S.h1.overlaysAPI}`],
+  ['H1 覆盖层 API 就位 + H2 水文已填充', S.h1.hydroShell && S.h1.overlaysAPI && S.h1.hydroFilled,
+    `hydro=${S.h1.hydroShell} 已算=${S.h1.hydroFilled} setVisibleOverlays=${S.h1.overlaysAPI}`],
   ['页面自测（runSelfTest）全部通过', S.h1.selfTestFailed.length === 0 && S.h1.selfTestChecks >= 15,
     `${S.h1.selfTestChecks} 条${S.h1.selfTestFailed.length ? '，失败：' + S.h1.selfTestFailed.join('、') : '，无失败项'}`],
   ['M25 draw call ≤ 20',             S.render.drawCalls <= 20,                             `${S.render.drawCalls} 次/帧`],
@@ -531,7 +534,15 @@ const hovered = await evaluate(`(() => {
   }
   if (best < 0) for (const t of P.tiles) if (t.center.z > 0.9 && t.elevation > P.CONFIG.seaLevel) { best = t.index; break; }
   P.setHovered(best);       // HUD 只在悬停/选中时可见，这里强制悬停一格
-  return { best, hydro: P.hydro(), overlays: P.overlays() };
+  // ★ 陷阱：**绝不能**把 P.hydro() 整个 returnByValue 回去 —— 它是 4 万个元素的
+  //   TypedArray + 邻接表 + 多流向 CSR，CDP 序列化会直接卡死（实测挂了 30 分钟）。
+  //   这里只回传一个摘要。
+  const hy = P.hydro();
+  return {
+    best, overlays: P.overlays(),
+    hydro: hy ? { riverCount: hy.riverCount, rivers: hy.isRiver.length, lakes: hy.lakes.length,
+      pruned: hy.pruned, ms: hy.ms } : null,
+  };
 })()`);
 await sleep(1100);
 const uiShot = await send('Page.captureScreenshot', { format: 'png' });
@@ -541,8 +552,8 @@ const uiShot = await send('Page.captureScreenshot', { format: 'png' });
   if (buf.length < 12000) console.log(`     ⚠ terrain-ui.png 只有 ${(buf.length / 1024).toFixed(1)} KB —— 星球可能不在画面里`);
 }
 await evaluate(`window.__PLANET__.setHovered(-1)`);       // 恢复，避免影响后续调用
-console.log(`UI 证据（图例两组 + HUD「水系」占位）→ ${path.relative(ROOT, path.join(OUT, 'terrain-ui.png'))}`);
-console.log(`  H1 状态：hydro=${JSON.stringify(hovered.hydro)} overlays=${JSON.stringify(hovered.overlays)} 悬停图块 #${hovered.best}`);
+console.log(`UI 证据（图例两组 + HUD「水系」）→ ${path.relative(ROOT, path.join(OUT, 'terrain-ui.png'))}`);
+console.log(`  H2 状态：水文 ${JSON.stringify(hovered.hydro)} overlays=${JSON.stringify(hovered.overlays)} 悬停图块 #${hovered.best}`);
 
 ws.close(); child.kill(); await sleep(400);
 try { fs.rmSync(profile, { recursive: true, force: true }); } catch { }

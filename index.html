@@ -147,9 +147,12 @@ const CONFIG = {
   //   level 3 →    642 图块 /   3840 三角形 /  生成 ~6 ms
   //   level 4 →   2562 图块 /  15360 三角形 /  生成 ~16 ms
   //   level 5 →  10242 图块 /  61440 三角形 /  生成 ~65 ms
-  //   level 6 →  40962 图块 / 245760 三角形 /  生成 ~175 ms  ← 现选值
-  //            （网格+地形 116.5 ms / 打包几何体 58.7 ms；实测值可在控制台或
-  //              __PLANET__.buildTimings 读到，别照抄这里的注释）
+  //   level 6 →  40962 图块 / 245760 三角形 /  生成 ~220 ms  ← 现选值
+  //            （网格+地形 116.5 ms / 打包几何体 58.7 ms / **水文数据层 ~113 ms**；
+  //              实测值可在控制台或 __PLANET__.buildTimings 读到，别照抄这里的注释）
+  //            ★ H2 起 terrainMs 里多了一段「水文数据层」（邻接表 + 填平 + 多流向
+  //              + 汇水累积 + 河网/湖泊），它是一次性的、只在 recomputeTerrain() 里跑，
+  //              与帧率无关；具体耗时读 world.hydro.ms。
   // 渲染架构（渲染重构后）：所有图块合并成 1 个 BufferGeometry + 顶点色（见 §7），
   //   draw call 与图块数**无关**（星球恒 1 次；星空 / 描边 / 矿石各自 +1），
   //   所以 level 只受「生成耗时」约束 —— 这正是敢上 level 6 的前提
@@ -256,7 +259,32 @@ const CONFIG = {
   // ★ H1：河流已从「群系」改为「覆盖层」，旧的三个参数（riverScale / riverWidth /
   //   riverMaxElevation）一并删除。旧实现是「另一路噪声的零值线」，判定出来的是
   //   "填满整格"的蓝色图块，不是有流向的树枝状水系。
-  //   新的水文参数统一放进 CONFIG.hydro，在 H2 落地；见 docs/river-system-design.md §3、§7。
+  //
+  // ★ H2：新模型是**重力驱动**的 —— 填平洼地 → 多流向(MFD) → 汇水累积 → 阈值提取，
+  //   于是「河网」是从地形上长出来的，天然有流向、天然成树枝。
+  //   参数按「数据层 / 渲染层」分块：这里只放 H2 数据层真正用到的六个。
+  //   渲染层（riverWidth* / riverLift / nodeJitter / climateCoupling）在 H3 加；
+  //   内流判定（potentialEvaporation）与盐湖在 H4 加。
+  //   刻意不提前塞占位参数 —— 用不到的配置项就是负债。
+  //   见 docs/river-system-design.md §4、§7。
+  hydro: {
+    runoffExponent: 1.5,     // 降水 → 产流的非线性指数：>1 拉开干湿差（湿处河密、干处河疏）
+    fillEpsilon: 1e-4,       // Priority-Flood 每步的抬升量：保证 filled 处处严格下坡（§4.3）
+    flowExponent: 1.1,       // 多流向的坡度幂：1 = 最平滑，越大越接近"只走最陡邻居"（直线感）
+    // 河网阈值，单位是「等效格数」（accum ÷ 陆地平均产流）。
+    // ★ 12 是 tools/lab-hydro.mjs 扫出来的（T ∈ {3,5,8,12,20,30} × F × R 共 54 组，见
+    //   docs/hydro-layer.md §3）。它不是拍脑袋：12 是**满足"河格汇水面积中位数 ≥ 20 格"的
+    //   最小阈值**（实测中位数 ≈ 1.67 × T，T=12 → 20.7 格；T=8 只有 13 格）。
+    //   再往上调：河网变稀、主干变短、海拔差更好看（T=20 → 中位 33 格、海拔差 −0.067）；
+    //   再往下调：河网变密（T=5 → 占陆地 25%）、最大水系变长（T=5 → 477 格），
+    //   但"河流比低地低 0.04"这条会失守（T=5 → 只有 −0.034）。
+    //   三个目标（主干长 / 海拔差 / 中位汇水）在 T 上是**互相冲突**的，见 §3 的冲突证明。
+    riverCellThreshold: 12,
+    // 湖泊过滤：ε 填平在极平坦处会留下深度 ≈ 若干 ε 的"过水段"，它们不是湖。
+    // 这两个阈值把"过水段"滤掉；H4 会按水量平衡再精调一次。
+    minLakeDepth: 0.002,     // 低于此深度不算被淹（单位 = 海拔）
+    minLakeArea: 4,          // 小于此格数的被淹区不画成湖
+  },
 
   /* --- 立体感 --- */
   // 本星球是「选择出生地」的俯视界面，不是可供 3D 角色行走的地形。
@@ -935,8 +963,8 @@ function classifyBiome(tile) {
  * 唯一与渲染层相关的字段是 `baseColor`，它由 `repaintAll()` 从 `biome` 重新派生，
  * 所以这里只负责把 `biome` 算对，颜色的事交给调用方。
  *
- * ★ H2 会在 computeClimate 之后插入 computeHydrology(tiles)（水文需要海拔+湿度+温度三者），
- *   并在此处调用 computeRivers() 重建河网几何体 —— 见 docs/river-system-design.md §10.3。
+ * ★ H2：气候之后接上水文（computeHydrology 需要海拔 + 湿度 + 温度三者齐备）。
+ *   H3 起还要在这里调用 buildRiverGeometry() 重建河网几何体 —— 见设计稿 §10.3。
  */
 function recomputeTerrain() {
   computeElevations(tiles);
@@ -945,6 +973,466 @@ function recomputeTerrain() {
     computeClimate(tile);                         // 由纬度与海拔推出温度、湿度
     tile.biome    = classifyBiome(tile);
   }
+  // 水文覆盖层的数据层（★ H2）。纯计算，渲染层不感知 —— H2 阶段画面上还看不到河。
+  world.hydro = computeHydrology(tiles);
+}
+
+/* =========================================================================
+ * §4.5  水文数据层（★ H2：填平 → 多流向 → 汇水累积 → 河网 / 湖泊）
+ *
+ * 目标：把「河流」从"另一路噪声的零值线"换成**重力驱动的真实水系**。
+ * 旧实现判定出来的是一格一格"填满整格"的蓝色图块，没有流向、没有汇流、
+ * 还会凭空出现/消失（v1 口径实测：126 个闭环、147 个连通分量、孤立河点 13.0%）。
+ *
+ * 新流水线（见 docs/river-system-design.md §4）：
+ *   邻接表 adj → 产流 runoff → Priority-Flood 填平 filled → 多流向 w
+ *              → 汇水累积 accum → 阈值提取 isRiver → 湖泊连通分量 lakes
+ *
+ * 全部是**纯计算、一次性**，跑在 recomputeTerrain() 里，运行时不重算；
+ * 渲染层完全不感知（H2 还不上色，只在 HUD 出数）。level 6 下实测 ≈ 113 ms
+ * （占整条地形链 220 ms 的一半 —— 大头是邻接表的 Map 与填平的堆，见 docs/hydro-layer.md §4）。
+ *
+ * 三条「构造保证」（不是调参调出来的，所以可以直接写进自测）：
+ *   ① filled ≥ elevation          —— Priority-Flood 的 max() 保证；
+ *   ② filled 沿下游严格递减        —— 每步都 +fillEpsilon，所以**不可能成环**；
+ *   ③ 有河格的下游也是有河格        —— 下游的 accum 必 ≥ 本格（只分流、不增减），
+ *                                    所以"孤立河点"恒为 0，不需要任何后处理。
+ * ========================================================================= */
+
+/**
+ * 最小二叉堆（键 = 高程，元素 = 图块下标），用两个平铺 TypedArray 存。
+ *
+ * 为什么手写而不是排序数组：Priority-Flood 是「每次取当前最低的水面」往外推，
+ * 每格只入堆一次，一共 40962 次 push / pop。排序数组的插入是 O(n)（合计 O(n²)），
+ * 二叉堆是 O(log n)。为什么要 TypedArray：40962 个 JS 对象在这个热循环里
+ * 光分配就是几毫秒，而且键是浮点数，用 Float64Array 比较不产生装箱。
+ */
+class MinHeap {
+  constructor(capacity) {
+    this.item = new Int32Array(capacity);
+    this.key = new Float64Array(capacity);
+    this.size = 0;
+  }
+
+  push(item, key) {
+    const it = this.item, ky = this.key;
+    let i = this.size++;
+    it[i] = item; ky[i] = key;
+    while (i > 0) {                                  // 上浮
+      const p = (i - 1) >> 1;
+      if (ky[p] <= ky[i]) break;
+      const ti = it[p]; it[p] = it[i]; it[i] = ti;
+      const tk = ky[p]; ky[p] = ky[i]; ky[i] = tk;
+      i = p;
+    }
+  }
+
+  pop() {
+    const it = this.item, ky = this.key;
+    const top = it[0];
+    const last = --this.size;
+    if (last > 0) {
+      it[0] = it[last]; ky[0] = ky[last];            // 末尾提到根，再下沉
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1, r = l + 1;
+        let m = i;
+        if (l < last && ky[l] < ky[m]) m = l;
+        if (r < last && ky[r] < ky[m]) m = r;
+        if (m === i) break;
+        const ti = it[m]; it[m] = it[i]; it[i] = ti;
+        const tk = ky[m]; ky[m] = ky[i]; ky[i] = tk;
+        i = m;
+      }
+    }
+    return top;
+  }
+}
+
+/**
+ * 邻接表：两格共享 ≥ 2 个对偶顶点 ⇔ 在球面网格上共边。
+ *
+ * ★ 为什么把它提到 index.html 里（原来每个验证脚本各建一份）：
+ *   它是**水文与将来所有"相邻关系"计算的公共输入**（河流、湖泊、势力扩散、
+ *   海岸线平滑、出生地评分……）。建一份、放在 world.hydro.adj 上，
+ *   工具直接从页面读，就不会出现"脚本里的邻接表和页面里的不一致"这种鬼问题。
+ *
+ * 规模校验：Σdeg = 12×5 + 40950×6 = 245760 = 2E（E = 三角形数），
+ * 所以"邻接边数 = 三角形数"是一个可以断言的硬关系，换 level 时一起变。
+ *
+ * 返回 `number[][]`（第 i 项是第 i 格的邻居下标数组）。刻意用普通数组而不是
+ * Int32Array：这是 JS 里访问最快的形状，245760 条边一次建完，内存也就几 MB。
+ */
+function buildAdjacency(tiles) {
+  const byVert = new Map();                          // 对偶顶点 → 拥有它的图块下标
+  for (const t of tiles) {
+    for (const vi of t.vertexIndices) {
+      let owners = byVert.get(vi);
+      if (owners === undefined) { owners = []; byVert.set(vi, owners); }
+      owners.push(t.index);
+    }
+  }
+
+  const adj = new Array(tiles.length);
+  const shared = new Map();                          // 本次扫描中"共同顶点数"
+  for (const t of tiles) {
+    shared.clear();
+    for (const vi of t.vertexIndices) {
+      for (const o of byVert.get(vi)) {
+        if (o === t.index) continue;
+        shared.set(o, (shared.get(o) || 0) + 1);
+      }
+    }
+    const list = [];
+    for (const [o, c] of shared) if (c >= 2) list.push(o);
+    list.sort((a, b) => a - b);                      // 规范化顺序 ⇒ 结果逐字节可复现
+    adj[t.index] = list;
+  }
+  return adj;
+}
+
+/**
+ * 每格产流（= "降水 − 蒸发"的极简代用）。
+ *
+ * 降水量直接用现成的湿度场（阶段 A 已经把它修成了干净的东西：没有大段精确为 0
+ * 的沙漠，带与带之间有连续过渡），所以**河网密度天然是"湿处密、干处疏"**。
+ * 温度只用来表达"太冷就不产流"（冰盖/雪线以上先简化成 0；将来要模拟融雪再加相位）。
+ *
+ * 海洋不产流：水的起点在陆地上，海洋只作为"排水终点"接收入流。
+ */
+function runoffAt(tile) {
+  if (tile.elevation <= CONFIG.seaLevel) return 0;
+  const coldFactor = clamp01(
+    (tile.temperature - CONFIG.tempIce) / (CONFIG.tempTundra - CONFIG.tempIce),
+  );
+  return Math.pow(clamp01(tile.moisture), CONFIG.hydro.runoffExponent) * coldFactor;
+}
+
+/**
+ * Priority-Flood + ε 填平：算出「把每个洼地填到能流出去」之后的水面高程 filled。
+ *
+ * 不填平会怎样：噪声地形有无数局部洼地，水往下走几步就掉进坑里 → 河网碎成几百段
+ * （v1 口径实测 147 个连通分量、最大水系只有 44 格）。
+ *
+ * 做法：把所有水域（elevation ≤ seaLevel，含海冰）当作种子放进最小堆，
+ * 每次弹出**当前水面最低**的格子往外扩散，新格子的水面取
+ * `max(自己的地面, 来源水面 + ε)`。这就是"从海里往里注水，水漫过每个坑"的过程。
+ *
+ * ★ 球面上没有"地图边缘"，所以全部水域做种子就足以覆盖整颗星球 —— 这是球面网格的红利。
+ * ★ ε 的作用：每步强行抬升一点点，保证 filled 上除真盆地外处处有**严格**下坡，
+ *   既排除"平地打转"，也让后面"按 filled 降序"直接就是拓扑序（§4.5）。
+ *   ε 太大 → 地形被抹平、河道走位失真；太小 → 浮点误差造环。1e-4 是实测可用值。
+ */
+function priorityFlood(tiles, adj) {
+  const n = tiles.length;
+  const filled = new Float64Array(n);
+  const visited = new Uint8Array(n);
+  const heap = new MinHeap(n);
+  const eps = CONFIG.hydro.fillEpsilon;
+
+  for (const t of tiles) {
+    if (t.elevation <= CONFIG.seaLevel) {
+      visited[t.index] = 1;
+      filled[t.index] = t.elevation;
+      heap.push(t.index, t.elevation);
+    }
+  }
+
+  while (heap.size > 0) {
+    const c = heap.pop();
+    const surface = filled[c] + eps;
+    for (const k of adj[c]) {
+      if (visited[k]) continue;
+      visited[k] = 1;
+      filled[k] = Math.max(tiles[k].elevation, surface);
+      heap.push(k, filled[k]);
+    }
+  }
+  return filled;
+}
+
+/**
+ * 多流向分配（MFD）：把每格的水按"坡度幂"分给所有比它低的邻居。
+ *
+ * 为什么不能用「只流给最低的那个邻居」（D6/D8）：六边形网格上 D6 会让河道出现
+ * 长的直线平行段 —— 这是地形水文里的经典 artifact（"noised-D8"效应），肉眼看就是"假"。
+ * MFD 则天然长出分叉与汇流，也就是我们要的**树枝状**。
+ *
+ * `flowExponent` 控制集中度：1 = 按坡度线性分（最平滑、分叉最多），
+ * 越大越接近"只走最陡的邻居"（越像 D6、越直）。1.1 是"仍有分叉但收敛成主河道"的常用值。
+ * 五边形格只有 5 个邻居，无需特殊处理（公式与度数无关）。
+ *
+ * 返回 CSR 布局：第 x 格的分流出口是 [start[x], start[x+1]) 区间内的
+ * target[i] / prob[i]，Σ prob = 1（没有下游的格子区间为空）。
+ * 为什么不用 `Array<Array<[k, p]>>`：24 万个出口小数组光对象头就是几十 MB，
+ * CSR 只要两个平铺数组，遍历也是顺序内存 —— 这是这个热循环里唯一值得"牺牲可读性"的地方。
+ */
+function flowWeights(tiles, adj, filled) {
+  const n = tiles.length;
+  let cap = 0;
+  for (let i = 0; i < n; i++) cap += adj[i].length;   // 上界 = 边数 ×2（每个方向各算一次）
+  const start = new Int32Array(n + 1);
+  const target = new Int32Array(cap);
+  const prob = new Float64Array(cap);
+  const expo = CONFIG.hydro.flowExponent;
+  let w = 0;
+
+  for (let x = 0; x < n; x++) {
+    start[x] = w;
+    const from = w;
+    const fx = filled[x];
+    let sum = 0;
+    for (const k of adj[x]) {
+      const drop = fx - filled[k];
+      if (drop <= 0) continue;                        // 只往更低处（严格，所以不会成环）
+      const s = Math.pow(drop, expo);
+      target[w] = k; prob[w] = s; w++;
+      sum += s;
+    }
+    if (sum > 0) {
+      for (let i = from; i < w; i++) prob[i] /= sum;  // 归一化：Σ = 1
+    } else {
+      w = from;                                       // 无下游（只可能是水域）：不留空条目
+    }
+  }
+  start[n] = w;
+  return { start, target, prob };
+}
+
+/**
+ * 汇水累积：沿 filled 降序把每格的 accum 按分流比例发给下游。
+ *
+ * ★ 为什么"按 filled 降序"就是拓扑序：filled 沿下游严格递减（ε 保证），
+ *   所以处理到某格时，**所有上游格子都已经把水发过来了**，一次遍历即可，不需要递归/DFS。
+ * ★ accum 的初值是**本格产流**，不是 1 —— 所以 accum ÷ 陆地平均产流 = "等效格数"，
+ *   河网阈值可以用"汇水面积 ≥ 20 格"这种与气候解耦的单位表达。
+ * ★ 用 Float64 而不是 Float32：4 万个格子逐级累加，Float32 的相对误差会到 1e-3，
+ *   而"水量守恒"要拿它当断言（Σ 产流 == Σ 终点 accum）。
+ */
+function accumulate(filled, w, runoff) {
+  const n = filled.length;
+  const accum = new Float64Array(runoff);            // 初值 = 本格产流
+  const order = new Array(n);
+  for (let i = 0; i < n; i++) order[i] = i;
+  order.sort((a, b) => filled[b] - filled[a]);       // 高 → 低
+
+  for (let i = 0; i < n; i++) {
+    const x = order[i];
+    const ax = accum[x];
+    if (ax === 0) continue;
+    for (let j = w.start[x]; j < w.start[x + 1]; j++) accum[w.target[j]] += ax * w.prob[j];
+  }
+  return accum;
+}
+
+/** 主下游 = 权重最大的那个出口；-1 = 没有下游（入海 / 内流终点）。渲染与玩法都读它。 */
+function mainDownstream(n, w) {
+  const down = new Int32Array(n).fill(-1);
+  for (let x = 0; x < n; x++) {
+    let best = -1, bestP = 0;
+    for (let j = w.start[x]; j < w.start[x + 1]; j++) {
+      if (w.prob[j] > bestP) { bestP = w.prob[j]; best = w.target[j]; }
+    }
+    down[x] = best;
+  }
+  return down;
+}
+
+/**
+ * 河网提取：`accum > 阈值 × 陆地平均产流` 即"候选河道"，再做**两步剪枝**。
+ *
+ * 阈值用**等效格数**表达（`riverCellThreshold: 20`），于是它同时满足
+ * P0-2 的附加条"河流格的汇水面积中位数 ≥ 20 格"，并且与气候解耦 ——
+ * 换种子、改气候都不用重标阈值。
+ *
+ * ■ 为什么必须有剪枝（★ H2 施工中发现设计稿 §8.4 的"定理 2"在 MFD 下不成立）
+ *   设计稿写的是"下游的 accum 必 ≥ 本格，所以有河格的下游也是有河格"。
+ *   那个推导只在**单流向**（水 100% 给一个邻居）下成立。
+ *   我们用多流向（按坡度幂分给多个邻居），主下游只拿到一部分水，于是
+ *   `accum[主下游] < accum[本格]` 完全可能 —— 一个河格的**主下游可以不是河格**。
+ *   不剪枝的话，渲染出来就是"河在半路凭空消失"（v1 的断头河占 31.9%）。
+ *
+ *   剪枝 1（断头河）：沿 filled **升序**（= 从下游往上游）标记 ——
+ *     河口/终点是"合法根"，一个河格合法当且仅当它的主下游也合法。
+ *     一遍 O(V) 就够，不需要迭代（拓扑序保证了依赖已算完）。
+ *   剪枝 2（孤立河点）：删掉没有任何相邻河格的河格。
+ *     一遍即可：被删的格子本来就不与任何河格相邻，删它不会让别的格子变孤立。
+ *
+ *   剪完这两步，"断头河 = 0"与"孤立河点 = 0"就从"调参调出来的"变成
+ *   **构造保证的定理**（见 runSelfTest 的水文不变量）。
+ *
+ * 顺带产出两个玩法字段：
+ *   isSource —— 有河、但没有"沿主下游流入自己"的上游河格（河源）；
+ *   isMouth  —— 有河、且主下游是海洋/终点（河口，河从这里入海）。
+ */
+function extractRivers(tiles, adj, filled, accum, unit, down) {
+  const n = tiles.length;
+  const isRiver = new Uint8Array(n);
+  const threshold = CONFIG.hydro.riverCellThreshold * unit;
+  const cells = [];
+  for (const t of tiles) {
+    if (t.elevation > CONFIG.seaLevel && accum[t.index] > threshold) {
+      isRiver[t.index] = 1;
+      cells.push(t.index);
+    }
+  }
+
+  // --- 剪枝 1：断头河 ---
+  cells.sort((a, b) => filled[a] - filled[b]);        // 升序 = 下游优先
+  const keep = new Uint8Array(n);
+  for (const x of cells) {
+    const d = down[x];
+    if (d < 0 || tiles[d].elevation <= CONFIG.seaLevel) keep[x] = 1;   // 河口/终点
+    else if (isRiver[d] && keep[d]) keep[x] = 1;                        // 下游合法 ⇒ 自己合法
+  }
+  let deadEnds = 0;
+  for (const x of cells) if (!keep[x]) { isRiver[x] = 0; deadEnds++; }
+
+  // --- 剪枝 2：孤立河点 ---
+  let isolated = 0;
+  for (const x of cells) {
+    if (!isRiver[x]) continue;
+    let neighbor = false;
+    for (const k of adj[x]) if (isRiver[k]) { neighbor = true; break; }
+    if (!neighbor) { isRiver[x] = 0; isolated++; }
+  }
+
+  const upstream = new Uint32Array(n);                // 沿主下游链的上游河格计数
+  for (let x = 0; x < n; x++) if (isRiver[x] && down[x] >= 0) upstream[down[x]]++;
+
+  const isSource = new Uint8Array(n);
+  const isMouth = new Uint8Array(n);
+  let count = 0;
+  for (let x = 0; x < n; x++) {
+    if (!isRiver[x]) continue;
+    count++;
+    if (upstream[x] === 0) isSource[x] = 1;
+    const d = down[x];
+    if (d < 0 || tiles[d].elevation <= CONFIG.seaLevel) isMouth[x] = 1;
+  }
+  return { isRiver, isSource, isMouth, count, pruned: { deadEnds, isolated } };
+}
+
+/**
+ * 湖泊：`depth = filled − elevation > minLakeDepth` 的**连通分量**。
+ *
+ * 每个分量 = 一个湖，附带面积 / 深浅 / 溢出点高程 / 入流。
+ *
+ * ★ H2 刻意**不做水面水量平衡**：Priority-Flood 会把所有洼地都填到"能流出去"，
+ *   所以这一步得到的每个湖在拓扑上都是外流湖。真正的"内流盆地"不是拓扑封闭造成的，
+ *   而是**蒸发 ≥ 补给**（里海、咸海、大盐湖、塔里木都是这样）——
+ *   那是 H4 用 `potentialEvaporation` 解出来的，所以这里 `isEndorheic` 先留 `null`
+ *   （"未判定"），而不是谎报 false。
+ *
+ * `minLakeArea` / `minLakeDepth` 的用处：ε 填平在极平坦处会留下深度 ≈ 若干 ε 的
+ * "过水段"，它们不是湖。这两个阈值把"过水段"滤掉，H4 会再按水量平衡精调。
+ */
+function findLakes(tiles, adj, filled, depth, accum, runoff, down) {
+  const n = tiles.length;
+  const minArea = CONFIG.hydro.minLakeArea;
+  const minDepth = CONFIG.hydro.minLakeDepth;
+  const lakeId = new Int32Array(n).fill(-1);
+  const seen = new Uint8Array(n);
+  const lakes = [];
+  const stack = [];
+  const members = [];
+
+  for (let s = 0; s < n; s++) {
+    if (seen[s] || depth[s] <= minDepth) continue;
+    seen[s] = 1;
+    stack.length = 0; stack.push(s);
+    members.length = 0;
+    let spillLevel = filled[s], outlet = s, depthSum = 0, depthMax = 0;
+
+    while (stack.length > 0) {
+      const x = stack.pop();
+      members.push(x);
+      const d = depth[x];
+      depthSum += d;
+      if (d > depthMax) depthMax = d;
+      if (filled[x] > spillLevel) { spillLevel = filled[x]; outlet = x; }
+      for (const k of adj[x]) {
+        if (!seen[k] && depth[k] > minDepth) { seen[k] = 1; stack.push(k); }
+      }
+    }
+
+    if (members.length < minArea) continue;          // 太小：当"过水段"，不成湖
+
+    const id = lakes.length;
+    for (const x of members) lakeId[x] = id;
+    lakes.push({
+      id,
+      area: members.length,
+      depthMean: depthSum / members.length,
+      depthMax,
+      spillLevel,          // 溢出点高程：水位顶到这里就开始出水
+      outlet,              // 溢出点所在的格子（H4 的"出湖河"从这里出发）
+      level: spillLevel,   // H4 会用「湖面水量平衡」把它压到 spillLevel 以下（内流湖）
+      inflow: 0,           // 湖面降水 + 湖外入流，下面统一补算
+      outflow: null,       // H4：外流湖的出水 = inflow − 湖面蒸发
+      isEndorheic: null,   // H4：null = 未判定
+    });
+  }
+
+  // 入流 = 湖面自身产流 + 「主下游落在湖里、而自己不在湖里」的格子的全部汇水。
+  // （MFD 会把水按比例分给多个出口，这里只算主下游那一份 —— H4 做水量平衡时再精确化。）
+  const lakeInflow = new Float64Array(n);
+  for (let y = 0; y < n; y++) {
+    const d = down[y];
+    if (d >= 0 && lakeId[d] >= 0 && lakeId[y] !== lakeId[d]) lakeInflow[d] += accum[y];
+  }
+  for (let i = 0; i < n; i++) {
+    const id = lakeId[i];
+    if (id < 0) continue;
+    lakes[id].inflow += runoff[i] + lakeInflow[i];
+  }
+
+  return { lakeId, lakes };
+}
+
+/**
+ * 水文总装：把上面几步串起来，结果挂到 world.hydro（契约见设计稿 §6.1）。
+ *
+ * 数据层是纯函数式的 —— 输入只有 tiles（海拔/湿度/温度），输出一个新对象，
+ * 不改 tile 上任何字段（`isRiver` 放在 hydro 里而不是 tile.isRiver 上，
+ * 就是为了保住「河是覆盖层、不是地表属性」这条分层）。
+ */
+function computeHydrology(tiles) {
+  const t0 = performance.now();
+  const n = tiles.length;
+
+  const adj = buildAdjacency(tiles);
+  const filled = priorityFlood(tiles, adj);
+  const w = flowWeights(tiles, adj, filled);
+  const down = mainDownstream(n, w);
+
+  const runoff = new Float64Array(n);
+  let landCount = 0, runoffSum = 0;
+  for (const t of tiles) {
+    const r = runoffAt(t);
+    runoff[t.index] = r;
+    if (t.elevation > CONFIG.seaLevel) { landCount++; runoffSum += r; }
+  }
+  const unit = landCount > 0 ? runoffSum / landCount : 0;   // 一格"平均湿地"贡献的水量
+
+  const accum = accumulate(filled, w, runoff);
+  const depth = new Float64Array(n);
+  for (let i = 0; i < n; i++) depth[i] = filled[i] - tiles[i].elevation;
+
+  const { isRiver, isSource, isMouth, count: riverCount, pruned } =
+    extractRivers(tiles, adj, filled, accum, unit, down);
+  const { lakeId, lakes } = findLakes(tiles, adj, filled, depth, accum, runoff, down);
+
+  return {
+    adj, filled, depth, runoff, accum,
+    w, down,
+    isRiver, isSource, isMouth,                      // 玩法接口：河道 / 河源 / 河口
+    lakeId, lakes,
+    unit,                                            // 陆地平均产流（"等效格数"的除数）
+    riverCount,
+    pruned,                                          // 剪枝统计（断头河 / 孤立河点各删了多少）
+    ms: +(performance.now() - t0).toFixed(1),        // 数据层耗时（调参时看这个）
+  };
 }
 
 /* =========================================================================
@@ -1208,18 +1696,29 @@ const world = {
   owner: null,       // Int16Array：归属，-1 = 无主
 
   /**
-   * 水文层（★ H1 先立空壳，H2 由 computeHydrology() 填充）。
+   * 水文层（★ H1 立空壳，H2 由 computeHydrology() 填充）。
    *
    * 纯数据、一次性算完、运行时不重算，渲染层不感知。契约见
    * docs/river-system-design.md §6.1：
-   *   adj      Int32Array[]   邻接表（公共设施：水文与将来所有相邻关系计算的公共输入）
-   *   filled   Float32Array   填平后的水面高程（≥ elevation）
-   *   depth    Float32Array   filled − elevation（= 湖深，正数即被淹格）
+   *   adj      number[][]     邻接表（公共设施：水文与将来所有相邻关系计算的公共输入）
+   *   filled   Float64Array   填平后的水面高程（≥ elevation）
+   *   depth    Float64Array   filled − elevation（= 湖深，正数即被淹格）
+   *   runoff   Float64Array   每格产流（= moisture^runoffExponent × 冷度）
+   *   accum    Float64Array   汇水量（按降水量加权；÷ unit = "等效格数"）
+   *   unit     number         陆地平均产流（"等效格数"的除数，河网阈值也用它）
+   *   w        {start,target,prob}  多流向分配的 CSR 布局（Σ prob = 1）
    *   down     Int32Array     主下游（argmax 权重）；-1 = 入海 / 内流终点
-   *   accum    Float32Array   汇水量（按降水量加权，实数量纲）
-   *   isRiver  Uint8Array     1 = 该格有河道穿过
+   *   isRiver  Uint8Array     1 = 该格有河道穿过（★ 放在 hydro 里，不是 tile 上）
+   *   isSource Uint8Array     1 = 河源（有河、无上游河格）
+   *   isMouth  Uint8Array     1 = 河口（有河、主下游是海洋）
    *   lakeId   Int32Array     -1 = 非湖；否则湖泊编号
-   *   lakes    []             湖泊属性表 { id, area, depth, level, isEndorheic, ... }
+   *   lakes    []             湖泊属性表 { id, area, depthMean, depthMax, spillLevel,
+   *                                         level, outlet, inflow, outflow, isEndorheic }
+   *                           ★ H2 的 outflow / isEndorheic 是 null（"未判定"）：
+   *                           Priority-Flood 只会给出拓扑外流湖，真正的内流盆地要等 H4
+   *                           用湖面水量平衡（蒸发 ≥ 补给）解出来。
+   *   ms       number         数据层耗时（ms）
+   *   pruned   {deadEnds,isolated}  剪枝删掉的格子数（断头河 / 孤立河点）
    */
   hydro: null,
 };
@@ -1268,9 +1767,20 @@ function updateHud(tile) {
   hudElev.textContent = tile.elevation.toFixed(3);
   hudLat.textContent = `${latDeg >= 0 ? 'N' : 'S'} ${Math.abs(latDeg).toFixed(1)}°`;
   hudLon.textContent = `${lonDeg >= 0 ? 'E' : 'W'} ${Math.abs(lonDeg).toFixed(1)}°`;
-  // 水系（★ H1 占位）：水文数据层在 H2 由 computeHydrology() 填进 world.hydro，
-  // 之后这里显示「汇水量 / 是否河道 / 河源 / 河口 / 湖泊 / 内流盆地」。
-  hudHydro.textContent = '—';
+  // 水系（★ H2）：汇水量按「等效格数」显示（accum ÷ 陆地平均产流），
+  // 这个单位和河网阈值 riverCellThreshold 是同一个，所以"≥20 格就是河"可以直接读出来。
+  const hy = world.hydro;
+  if (hy) {
+    const i = tile.index;
+    const eq = hy.unit > 0 ? hy.accum[i] / hy.unit : 0;
+    let text = `${eq.toFixed(1)} 格`;
+    if (hy.isRiver[i]) text += hy.isSource[i] ? ' · 河源' : (hy.isMouth[i] ? ' · 河口' : ' · 河道');
+    const lid = hy.lakeId[i];
+    if (lid >= 0) text += ` · 湖#${lid}(${hy.lakes[lid].area}格)`;
+    hudHydro.textContent = text;
+  } else {
+    hudHydro.textContent = '—';
+  }
   // 造山带强度（★ 阶段 D）：≥ orogenyMountain 即入山，再按温度分雪峰/裸岩。
   // 调参数时这一行是主要读数（山脉带的位置、宽度、峰值都看它）。
   hudOrogeny.textContent = `${tile.orogeny.toFixed(3)}${tile.orogeny >= CONFIG.orogenyMountain
@@ -1787,6 +2297,103 @@ function runSelfTest(tiles) {
     check('造山带把陆地抬高了（山地平均海拔 > 陆地平均海拔）',
       mean(mtn) > mean(land) + 0.15,
       `山地 ${mean(mtn).toFixed(3)} vs 陆地 ${mean(land).toFixed(3)}`);
+  }
+
+  // ---- 水文不变量（★ H2）----
+  // 这几条是**算法性质**，不是调参调出来的好看：只要算法没错，它们必然成立。
+  // 所以它们比"指标达标"更值得断言 —— 指标会随参数漂，定理不会。
+  if (world.hydro) {
+    const hy = world.hydro;
+    const n = tiles.length;
+
+    let deg = 0;
+    for (let i = 0; i < n; i++) deg += hy.adj[i].length;
+    check('Σdeg = 2E（邻接表与三角形数一致）',
+      deg === gfx.triToTile.length, `${deg} / 三角形 ${gfx.triToTile.length}`);
+
+    let geOK = true, geBad = -1;
+    for (let i = 0; i < n; i++) {
+      if (hy.filled[i] < tiles[i].elevation - 1e-9) { geOK = false; geBad = i; break; }
+    }
+    check('filled ≥ elevation（Priority-Flood 的 max() 保证）',
+      geOK, geOK ? `${n} 格全过` : `图块 ${geBad}`);
+
+    // filled 沿主下游严格递减 ⇒ 无环（"沿下游走"不可能回到原点）
+    let monoOK = true, monoBad = -1;
+    for (let i = 0; i < n; i++) {
+      const d = hy.down[i];
+      if (d >= 0 && !(hy.filled[d] < hy.filled[i])) { monoOK = false; monoBad = i; break; }
+    }
+    check('filled 沿主下游严格递减（构造上不可能成环）',
+      monoOK, monoOK ? '无环' : `图块 ${monoBad} → ${hy.down[monoBad]}`);
+
+    // 每个陆地格都必须有下游 —— 否则说明存在"陆地洼地"，填平漏了
+    let landNoDown = 0;
+    for (const t of tiles) if (t.elevation > CONFIG.seaLevel && hy.down[t.index] < 0) landNoDown++;
+    check('每个陆地格都有主下游（ε 保证不存在陆地洼地）', landNoDown === 0, `${landNoDown} 格无下游`);
+
+    // 可达性：从所有水域沿「反向 down 链」扩散，应当覆盖全部陆地格。
+    // 这一条同时排除了"水在半路卡住"，是 M15（孤立河点）与"必须能入海"的根。
+    {
+      const head = new Int32Array(n).fill(-1);
+      const next = new Int32Array(n).fill(-1);
+      for (let x = 0; x < n; x++) {
+        const d = hy.down[x];
+        if (d >= 0) { next[x] = head[d]; head[d] = x; }
+      }
+      const reach = new Uint8Array(n);
+      const queue = [];
+      for (const t of tiles) if (t.elevation <= CONFIG.seaLevel) { reach[t.index] = 1; queue.push(t.index); }
+      for (let qi = 0; qi < queue.length; qi++) {
+        for (let e = head[queue[qi]]; e >= 0; e = next[e]) if (!reach[e]) { reach[e] = 1; queue.push(e); }
+      }
+      let unreached = 0;
+      for (const t of tiles) if (t.elevation > CONFIG.seaLevel && !reach[t.index]) unreached++;
+      check('每个陆地格都能沿主下游走到海洋', unreached === 0, `${unreached} 格走不到`);
+    }
+
+    // 断头河 = 0 / 孤立河点 = 0（★ 由 extractRivers 的两步剪枝**构造保证**）
+    // 注意：设计稿 §8.4 原写的是"孤立河点恒为 0，不需要任何后处理"，
+    // 但那个推导假设了单流向。MFD 下主下游只拿到一部分水，accum 不再单调，
+    // 所以断头河/孤立点**确实会出现**（实测未剪枝时孤立点占 1.2–2.4%），
+    // 必须显式剪掉。剪完之后这两条才是真正的定理。
+    let deadEnd = 0, isolated = 0, riverCount = 0;
+    for (let i = 0; i < n; i++) {
+      if (!hy.isRiver[i]) continue;
+      riverCount++;
+      const d = hy.down[i];
+      if (d >= 0 && tiles[d].elevation > CONFIG.seaLevel && !hy.isRiver[d]) deadEnd++;
+      let neighbor = false;
+      for (const k of hy.adj[i]) if (hy.isRiver[k]) { neighbor = true; break; }
+      if (!neighbor) isolated++;
+    }
+    check('断头河 = 0（每个非河口河格的主下游也是河格）', deadEnd === 0,
+      `${deadEnd} 个（剪枝前删掉 ${hy.pruned.deadEnds} 个）`);
+    check('孤立河点 = 0（河网不会凭空出现/消失）', isolated === 0,
+      `${isolated} 个（剪枝前删掉 ${hy.pruned.isolated} 个）｜共 ${riverCount} 个河格（占图块 ${(riverCount / n * 100).toFixed(2)}%）`);
+
+    // 水量守恒：Σ 产流 == Σ 终点（无下游的格子）的汇水
+    {
+      let runoffSum = 0, sinkSum = 0;
+      for (let i = 0; i < n; i++) {
+        runoffSum += hy.runoff[i];
+        if (hy.down[i] < 0) sinkSum += hy.accum[i];
+      }
+      const rel = runoffSum > 0 ? Math.abs(sinkSum - runoffSum) / runoffSum : 0;
+      check('水量守恒（Σ 产流 = Σ 终点汇水，相对误差 < 1e-6）', rel < 1e-6,
+        `产流 ${runoffSum.toFixed(2)} vs 终点 ${sinkSum.toFixed(2)}（相对误差 ${rel.toExponential(2)}）`);
+    }
+
+    // 河流平均海拔 < 低地平均海拔（水只往低处走，构造上必然）
+    {
+      const lowland = tiles.filter((t) =>
+        t.biome === BIOME.FOREST || t.biome === BIOME.GRASSLAND || t.biome === BIOME.DESERT);
+      const rivers = tiles.filter((t) => hy.isRiver[t.index]);
+      const meanOf = (a) => a.reduce((s, t) => s + t.elevation, 0) / (a.length || 1);
+      check('河流平均海拔 < 低地平均海拔（水只往低处走）',
+        rivers.length > 0 && meanOf(rivers) < meanOf(lowland),
+        `河流 ${meanOf(rivers).toFixed(4)} vs 低地 ${meanOf(lowland).toFixed(4)}（差 ${(meanOf(rivers) - meanOf(lowland)).toFixed(4)}）`);
+    }
   }
 
   // 生物群系统计

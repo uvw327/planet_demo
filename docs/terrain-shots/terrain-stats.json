@@ -6,9 +6,9 @@
     "level": 6,
     "tiles": 40962,
     "triangles": 245760,
-    "terrainMs": 114.2,
-    "geometryMs": 60.4,
-    "totalMs": 174.6
+    "terrainMs": 263,
+    "geometryMs": 56.7,
+    "totalMs": 319.7
   },
   "params": {
     "landFraction": 0.38,
@@ -137,8 +137,9 @@
     "riverTiles": 0,
     "riverFieldLeft": false,
     "hydroShell": true,
+    "hydroFilled": true,
     "overlaysAPI": true,
-    "selfTestChecks": 22,
+    "selfTestChecks": 31,
     "selfTestFailed": []
   },
   "latProfile": [
