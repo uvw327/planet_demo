@@ -29,9 +29,10 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 | `lab-orogeny.mjs` | **造山带调参实验室**（阶段 D）：扫 `bands / width / mtn / gain / minLen / maxLen / peak* / tempSnow / elevationSpread`，输出山脉占比（M6）、**带形长宽比**（最小外接矩形，面积加权 + 最大分量）、长条覆盖面积占比、赤道雪峰数、红线回归，并自动跑一遍 **v1 口径对照** | `node tools/lab-orogeny.mjs`<br>`node tools/lab-orogeny.mjs --bands=4,5,6 --width=5,6 --mtn=0.35` |
 | `shot-orogeny.mjs` | **阶段 D 截图**：全球 6 视角 + 「只显示山脉/雪峰」4 视角 + 2 个聚焦近景（`docs/orogeny-shots/` 的来源）。内置"背景色格数"探针，防止群系筛选没关掉就截图 | `node tools/shot-orogeny.mjs` |
 | `lab-climate.mjs` | **调参实验室**：加载一次页面，在页面内扫 `CONFIG` 组合，输出对比表 | `node tools/lab-climate.mjs` |
-| `verify-hydro.mjs` | **H2 水文数据层验收**：16 条断言（河网拓扑 / 两条 P0-2 附加条 / **六条算法定理** / 湖泊 / 页面自测），文件头写了 M12–M16 的**口径改写与冲突证明** | `node tools/verify-hydro.mjs` |
+| `verify-hydro.mjs` | **H2 + H3 验收**：22 条断言（河网拓扑 / 两条 P0-2 附加条 / **六条算法定理** / 湖泊 / **H3 河网几何体 + M31/M32/M33/M34/M35/M37** / 页面自测），文件头写了 M12–M16 与 M32/M35 的**口径改写与冲突证明** | `node tools/verify-hydro.mjs` |
 | `lab-hydro.mjs` | **水文扫参实验室**：一次加载内扫 `riverCellThreshold × flowExponent × runoffExponent`（默认 54 组），输出**两套图论口径**（流图 / 格邻接）+ 密度/汇水/海拔/度分布表，写 `tools/out/lab-hydro.json` | `node tools/lab-hydro.mjs`<br>`$env:HY_T='3,5,8,12'; node tools/lab-hydro.mjs` |
 | `lab-hydro-map.mjs` | **河网形状诊断**：把河网**正交投影**成一张 2D 图（灰绿=陆地 · 暗青=湖 · 亮蓝=河道，线宽 ∝ `accum^0.42`），直接看是"树枝"还是"糊片"。**不需要三维渲染，几秒出图** —— H2 唯一"看得见"的证据 | `node tools/lab-hydro-map.mjs`<br>`node tools/lab-hydro-map.mjs --t 20 --f 1.4` |
+| `shot-river.mjs` | **H3 河网渲染截图**（6 组）：全球 4 视角 / 「只留河线」2 视角 / 聚焦主干（远·近·近只留河线）/ **宽度-流量散点**（页内 canvas）/ `climateCoupling` 0-1 对照 / **阈值 T=12·20·30 同视角对照**（H2 头号风险的直接视觉证据） | `node tools/shot-river.mjs` |
 | `table-check.mjs` | markdown 表格列数自检（改完文档跑一遍） | `node tools/table-check.mjs docs/v1-biome-globe-review.md` |
 
 ## ⚠️ 四个已经踩过的坑（新脚本请照抄防护）
@@ -58,6 +59,14 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
    `verify-terrain.mjs` 曾经这么干过一次。要取数就在页面里先算好**摘要**
    （`riverCount / rivers / lakes / pruned / ms` 这种标量），只回传摘要；
    要看明细就写 `tools/verify-hydro.mjs` 那种"在页面内把指标算完再返回"的 IIFE。
+5. **★ `refresh()` 会把顶点色重置回群系色** —— 所以 `setVisibleBiomes(['__none__'])`（只留河线）
+   之后再 `refresh()`（例如换 `riverCellThreshold`），**必须重新调一次 `setVisibleBiomes`**，
+   否则下一张截图里星球又出现了（`shot-river.mjs` 的阈值对照组踩过）。
+6. **★ 三角带的绕序**（H3 踩过，代价是整条河网在画面上完全消失）：
+   顶点按 `(左i, 右i)` 成对排队时，`(左i, 右i, 左i+1)` 这个顺序算出来的法线朝**球心**
+   （与星球主体"从球外看逆时针"相反），会被 `FrontSide` **背面剔除**。
+   要按 `(左i, 左i+1, 右i)` 排。诊断技巧：把 `material.side` 临时改成 `DoubleSide` 截图对比 ——
+   若画面**逐像素一致**，说明不是剔除问题，别在这上面浪费时间。
 
 ## 关键前提：`window.__PLANET__`
 
@@ -78,6 +87,8 @@ window.__PLANET__ = {
   setOre, clearOres,
   /* 覆盖层（★ H1 起与「气候群系」分层，见 docs/river-system-design.md §3.2） */
   hydro,                              // () => world.hydro，H1 为 null，H2 起有水文数据（16 个字段，见 docs/hydro-layer.md §2）
+  river,                              // ★ H3：() => gfx.riverStats（顶点/三角形/链数/格间距/每格河宽/格网指纹）
+  riverMesh,                          // ★ H3：() => gfx.riverLayer（河网 Mesh，1 个，独立几何体）
   setVisibleOverlays, overlays,       // (['river']) / (['ore']) / (null = 全部恢复)
   /* 顶点色 */
   repaintTile, repaintAll, setVisibleBiomes,
@@ -93,8 +104,10 @@ window.__PLANET__ = {
 
 ⚠️ **`CONFIG.level` 现在是 6**（图块 **40962** / 三角形 **245760**，间距约 1.0°）。
 脚本里**别写死图块数 / 三角形数 / 边数**：level → level+1 这些量都 ×4。
-当前值：图块 40962、三角形 245760、邻接边 122880、顶点 286722、生成耗时约 220 ms
-（其中水文数据层约 90–160 ms，随机器负载浮动）。
+当前值：图块 40962、星球三角形 245760、邻接边 122880、顶点 286722、生成耗时约 265–280 ms
+（其中水文数据层约 90–160 ms、**H3 河网几何体 12–19 ms**，随机器负载浮动）。
+H3 起星球三角形仍是 245760，**河网是独立几何体**（18518 三角形），所以 `stats().triangles`
+会显示 264278 —— 那是两个 Mesh 的和，不是星球变密了。
 想读真数用 `__PLANET__.buildTimings`（见上表），或看控制台启动日志。
 "比例型"指标（陆地占比、山脉占比…）与 level 无关；"计数型"指标（赤道雪峰格数…）会 ×4。
 
@@ -103,7 +116,8 @@ window.__PLANET__ = {
 与 `init()` **共用同一份实现**。之所以能这么放心地重算海拔，是因为默认
 `enableHeightOffset === false` 时**海拔不参与顶点坐标**（球面恒为半径 1），
 所以换地形参数不需要重建几何体 —— 这正是 `lab-terrain.mjs` 能在一次加载里扫几十组的原因。
-（例外：H3 的河网是**独立几何体**，改水文参数必须重建它，见设计书 §10.3。）
+（例外：H3 的河网是**独立几何体**，改水文参数必须重建它，见设计书 §10.3。
+`rebuildRivers()` 已挂进 `refresh()`，所以直接 `refresh()` 就会重建，level 6 实测 12–19 ms。）
 
 ⚠️ 重构后整颗星球只有 **1 个 Mesh**，所以**不能再逐格切 `visible`**（旧的 `t.mesh.visible = …`
 写法会直接报错）。要做"只留某几个群系"的对比截图，改用
@@ -144,4 +158,5 @@ window.__PLANET__ = {
 - `shot-terrain.mjs` → `docs/terrain-shots/candidates/`
 - `shot-orogeny.mjs` → `docs/orogeny-shots/`（全球 6 + 山地隔离 4 + 聚焦 6）
 - `lab-hydro-map.mjs` → `docs/hydro-shots/`（河网形状诊断 2D 图）
-- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` / `verify-hydro.mjs` / `lab-hydro.mjs` → `tools/out/*.json`（`tools/out/` 不入库）
+- `shot-river.mjs` → `docs/river-shots/`（全球 4 + 只留河线 2 + 聚焦 3 + 宽度散点 1 + 气候耦合 2 + 阈值对照 3）
+- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` / `verify-hydro.mjs` / `lab-hydro.mjs` / `shot-river.mjs` → `tools/out/*.json`（`tools/out/` 不入库）

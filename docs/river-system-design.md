@@ -490,9 +490,15 @@ world.hydro = {
 
 ```js
 hydro: () => world.hydro,
-setVisibleOverlays(list),      // ['river','lake'] —— 与 setVisibleBiomes 并列
-rebuildRivers(),               // 只重建河网几何体（调参后单独调用；见 §10.3）
+river: () => gfx.riverStats,        // ★ H3：河网几何体统计（顶点/三角形/链数/格间距/每格河宽）
+riverMesh: () => gfx.riverLayer,    // ★ H3：河网 Mesh（1 个，独立几何体）
+setVisibleOverlays(list),           // ['river','lake'] —— 与 setVisibleBiomes 并列
+rebuildRivers(),                    // 只重建河网几何体（调参后单独调用；见 §10.3）
 ```
+
+> ★ H3 落地时把 `rebuildRivers()` **挂进了 `refresh()`**：改任何水文/渲染参数之后
+> `refresh()` 会自动重建河网几何体（§10.3 说好的代价：level 6 实测 12–19 ms）。
+> 所以调参不需要手动调 `rebuildRivers()`，直接 `refresh()` 就行。
 
 ---
 
@@ -504,24 +510,27 @@ rebuildRivers(),               // 只重建河网几何体（调参后单独调�
 | `fillEpsilon` | 1e-4 | 填平步长 | 湖泊数量/河道走位；太小会造环 |
 | `flowExponent` | 1.1 | 多流向集中度（1=最平滑，越大越像 D6 直线） | 格网指纹（新指标） |
 | `riverCellThreshold` | **12** | 河网阈值（"等效格数"） | M12–M16、河网密度 |
-| `riverWidthScale` | 待标定 | 河宽尺度 | 目视（§5.3） |
+| `riverWidthScale` | **0.062** | 河宽尺度 | 目视（§5.3） |
 | `riverWidthExponent` | 0.42 | 河宽对流量的幂 | 目视 + 宽度单调性 |
-| `riverMinWidth` / `riverMaxWidth` | 待标定 | 河宽上下限 | 目视 |
+| `riverMinWidth` / `riverMaxWidth` | **0.06 / 0.80** | 河宽上下限（单位：格） | 目视 |
 | `riverLift` | 0.002 | 河网层离球面的高度 | 无 z-fighting |
-| `nodeJitter` | 0.15 | 节点抖动幅度（打散格网指纹） | 格网指纹（新指标） |
+| `riverNodeJitter` | 0.15 | 节点抖动幅度（打散格网指纹） | 格网指纹（新指标） |
+| `riverSmoothPasses` | 2 | Chaikin 切角次数（端点保留） | 格网指纹 |
 | `minLakeArea` | 4 | 小于此格数的被淹区不画成湖（当过水段） | M17 |
 | `minLakeDepth` | **0.002** | 同上（浅坑当过水） | M17 |
 | `potentialEvaporation` | 待标定 | **内流盆地数量的唯一旋钮** | **M18** |
 | `climateCoupling` | 1.0 | 河宽是否随流量（0 用于出对照图） | 新指标（粗细受降雨影响） |
 
-**落地进度**：★ H2 只落地了**数据层**的 6 个（`runoffExponent` / `fillEpsilon` / `flowExponent` /
+**落地进度**：★ H2 落地了**数据层**的 6 个（`runoffExponent` / `fillEpsilon` / `flowExponent` /
 `riverCellThreshold` / `minLakeDepth` / `minLakeArea`）—— 刻意不提前塞用不到的占位参数。
-`riverWidth*` / `riverLift` / `nodeJitter` / `climateCoupling` 在 **H3** 加，
+★ **H3 落地了渲染层的 8 个**（`riverWidthScale` / `riverWidthExponent` / `riverMinWidth` /
+`riverMaxWidth` / `riverLift` / `riverNodeJitter` / `riverSmoothPasses` / `climateCoupling`）。
 `potentialEvaporation` 在 **H4** 加。
 
 **标定方式**：`tools/lab-hydro.mjs`（★ H2 已落地）一次页面加载内扫
 `riverCellThreshold × flowExponent × runoffExponent`（54 组），输出两套图论口径 + 密度/汇水/海拔的表。
 **不靠手感，靠表。** H2 的扫描结论（含一条"三个目标互相冲突"的证明）见 `docs/hydro-layer.md` §3。
+渲染层参数用 `tools/shot-river.mjs` 出**同视角对照图**（T=12/20/30、climateCoupling 0/1）。
 
 ---
 
@@ -555,20 +564,20 @@ rebuildRivers(),               // 只重建河网几何体（调参后单独调�
 
 | # | 指标 | 定义 | 目标 | 针对你的哪条意见 |
 | --- | --- | --- | --- | --- |
-| M29 | **河网的分叉比** | 按 Strahler 级数统计 `Rb = N_ω / N_{ω+1}` | 3–5（真河网典型值） | "树枝状水系" |
-| M30 | **河宽单调性** | 沿主下游链，`width` 递减次数 | 0 | "从山脚流到别处" |
-| M31 | **入海率** | 最终入海的河格 / 全部河格 | ≥ 70% | "有的河流会入海" |
-| M32 | **干湿分异** | 雨林区每格河网密度 ÷ 沙漠区 | ≥ 3 | "粗细受降雨量影响" |
-| M33 | **格网指纹** | 河段转角落入 `60°` 整数倍 ±3° 的占比 | ≤ 40% | "不能像格子" |
-| M34 | **确定性** | 同种子跑两次，`hydro.*` 逐字节比较 | 完全相同 | 可复现 |
-| M35 | **宽度—流量单调相关** | `spearman(width, accum)` on 河格 | ≥ 0.9 | "粗细受降雨量影响" |
-| M36 | **河流不入湖** | 河线端点与湖面格的冲突数 | 0 | 渲染正确性 |
+| M31 | **河网的分叉比** | 按 Strahler 级数统计 `Rb = N_ω / N_{ω+1}` | 3–5（真河网典型值） | "树枝状水系" |
+| M32 | **河宽单调性** | ★ H3 口径修正：`accum` 在 MFD 下**不单调**（§8.4），所以改判**幅度** —— 沿主下游的**最大回缩幅度** ≤ 25% | ≤ 25% | "从山脚流到别处" |
+| M33 | **入海率** | 最终入海的河格 / 全部河格 | ≥ 70% | "有的河流会入海" |
+| M34 | **干湿分异** | 雨林区每格河网密度 ÷ 沙漠区 | ≥ 3 | "粗细受降雨量影响" |
+| M35 | **格网指纹** | ★ H3 口径修正：转角落在 `60°` 整数倍 ±3° 的占比，但**直行段（< 5°）不计入分母**（"60° 的整数倍"含 0°，会把"越平滑"误判成"越指纹"） | ≤ 40% | "不能像格子" |
+| M36 | **确定性** | 同种子跑两次，`hydro.*` 逐字节比较 | 完全相同 | 可复现 |
+| M37 | **宽度—流量单调相关** | `spearman(width, accum)` on 河格 | ≥ 0.9 | "粗细受降雨量影响" |
+| M38 | **河流不入湖** | 河线端点与湖面格的冲突数 | 0 | 渲染正确性 |
 
 ### 8.3 验收脚本与要出的图
 
 新增 `tools/verify-hydro.mjs`：
 
-1. **数值断言**：M12–M18、M29–M36，逐条 ✅/❌，不达标退出码 1（与 `verify-terrain.mjs` 同款）。
+1. **数值断言**：M12–M18、M31–M38，逐条 ✅/❌，不达标退出码 1（与 `verify-terrain.mjs` 同款）。
 2. **自测不变量**（也进 `runSelfTest()`）：水量守恒、`filled ≥ elevation`、下游单调、
    每个非水格都能沿 `down` 走到水域（或内流盆地）、无环、`Σdeg = 2E`（level 6 = **245760**，
    即"三角形数"，换 level 时跟着变，别写死）。
@@ -671,15 +680,32 @@ rebuildRivers(),               // 只重建河网几何体（调参后单独调�
 >    河格汇水中位数 20.65 等效格 · 最大汇水 650 等效格 · 河流海拔 − 低地海拔 −0.0592 ·
 >    雨林/沙漠河网密度比 21.5× · 湖泊 15 个（最大 39 格）· 数据层耗时 ~90–115 ms。
 
-### H3 —— 河网渲染（第一次看见树枝）
+### H3 —— 河网渲染（第一次看见树枝）✅ 已完成
 
 | 项 | 内容 |
 | --- | --- |
 | 改什么 | `buildRiverGeometry()`（三角带 + 节点抖动 + Chaikin + 球面展开 + `riverLift`）；1 个 Mesh + 1 个材质；河源/汇流/河口画法；`setVisibleOverlays(['river'])` |
 | 能看见什么 | **第一次出现树枝状水系**：细支流汇成主干、河口入海 |
-| 怎么验 | M29/M30/M31/M33/M35 + `river-only.png` / `river-close.png` / `river-width-vs-accum.png`；draw call ≤3 |
+| 怎么验 | M31/M32/M33/M35/M37 + `river-only.png` / `river-close.png` / `river-width-vs-accum.png`；draw call ≤3 |
 | 改动量 | ≈ 200 行 |
 | 风险 | 中（球面展开、极点、宽度插值要仔细） |
+
+> **施工记录**（详见 `docs/hydro-layer.md` §6.3）：
+> ① 按上表完成：`CONFIG.hydro` 加 8 个渲染层参数、`buildRiverGeometry()` + `rebuildRivers()`、
+>    `refresh()` 里重建几何体（§10.3 的代价兑现：level 6 实测 12–19 ms）、图例加「河流（线）」；
+> ② **1 个 Mesh + 1 次 draw call**：draw call 2 → 3（星空 + 星球 + 河网），三角形 245760 → 264278，
+>    河网本身 18518 三角形 / 19704 顶点 / 593 条链；
+> ③ **踩到一个真陷阱**：三角带的绕序反了（`(左i, 右i, 左i+1)` 的法线朝**球心**），
+>    被背面剔除 → 整条河网在画面上**完全消失**。索引改成 `(左i, 左i+1, 右i)` 才对（§5.2 已补注）；
+> ④ **M35 口径修正**：原定义"转角落在 60° 整数倍 ±3°"**包含 0°**，而平滑后的河道绝大多数
+>    折点近乎直行 → 越平滑"指纹"越高（实测平滑前 8.3% / 平滑后 59.4%，完全反了）。
+>    改为"直行段（< 5°）不计入分母"后：平滑后 **0%**、只有抖动未平滑 1.6%（直行段占 71.2%）；
+> ⑤ **M32 口径修正**：§5.3 断言"`accum` 沿下游单调不减 ⇒ 河宽自动单调不缩"，
+>    这个前提在 MFD 下**不成立**（与 §8.4 的修正同源）。实测 9.1% 的河格"下游比本格窄"，
+>    最大回缩 **23.0%**。口径改成**幅度**判据（最大回缩 ≤ 25%，局部小幅回缩肉眼不可见）；
+> ⑥ **M31 分叉比实测 4.52 / 3.33**（Strahler 各级格数 828/183/55）—— 落在真河网的典型区间 [3,5]；
+> ⑦ **H2 的"二维片"风险被看清楚了**（渲染层能做的都做了）：主干变成"毛毛虫"（宽带上长横向短刺）。
+>    三档阈值同视角渲染对照图已产出，T=20 明显更"树"但更稀 —— **待用户拍板**。
 
 ### H4 —— 湖泊与内流盆地（补上 P1-1）
 
@@ -687,7 +713,7 @@ rebuildRivers(),               // 只重建河网几何体（调参后单独调�
 | --- | --- |
 | 改什么 | 湖泊连通分量 + `minLakeArea/minLakeDepth` 过滤 + **湖面水量平衡**（`potentialEvaporation`）+ 盐湖判定 + 湖面顶点色分档 + 河线在湖边断开 |
 | 能看见什么 | 陆地上出现湖泊；干旱区出现内流盆地/盐湖；河在湖边断开、不穿过湖 |
-| 怎么验 | M17/M18/M32/M36 + `river-lakes.png` / `river-wet-vs-dry.png` |
+| 怎么验 | M17/M18/M34/M38 + `river-lakes.png` / `river-wet-vs-dry.png` |
 | 改动量 | ≈ 120 行 |
 | 风险 | 中（`potentialEvaporation` 与 `fillEpsilon` 要联合标定，M18 才落进 5–25） |
 
@@ -750,7 +776,7 @@ M17 要"湖泊 ≥30、最大湖 ≥15 格"，所以必须有 `minLakeArea` / `m
 
 多流向是**为算准流量**，但画线需要**一条明确的路**。做法：流量用 MFD 累积，
 走向取 `argmax w[k]`（等价于"多点流向 + 单点画线"）。副作用：部分支流的流量被"借"给了主干，
-分叉比（M29）可能偏高 → 用 `flowExponent` 调。
+分叉比（M31）可能偏高 → 用 `flowExponent` 调。
 
 ### 10.5 球面极点
 

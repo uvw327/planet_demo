@@ -309,7 +309,14 @@ const S = await evaluate(`(() => {
   }
 
   const info = P.renderer.info;
-  let meshCount = 0; P.scene.traverse((o) => { if (o.isMesh) meshCount++; });
+  // ★ H3 起星球不止 1 个 Mesh：河网是**独立几何体 + 独立材质**（覆盖层各自独立成层）。
+  //   所以 M25 的口径是「星球主体合并成 1 个 Mesh」，覆盖层单独计数（自测里同一条口径）。
+  let meshCount = 0, overlayMeshes = 0;
+  P.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    meshCount++;
+    if (o === P.gfx.riverLayer || o === P.gfx.oreLayer) overlayMeshes++;
+  });
 
   // ★ 阶段 D：山脉带形状（面积加权口径，见 window.__VT__.bandStats 注释）
   const band = window.__VT__.bandStats(isMtn);
@@ -395,7 +402,7 @@ const S = await evaluate(`(() => {
     latProfile,
     elevationQuantiles: { p05: round(pct(elevs, 0.05)), p50: round(pct(elevs, 0.5)), p62: round(pct(elevs, 0.62), 4), p95: round(pct(elevs, 0.95)), max: round(Math.max(...elevs)) },
     regression: { tempMonoOK, rainforestHighLat, rainforestLatP95: round(pct(rfLat, 0.95)), iceLowLat, snowLowLat, rfAdjIce },
-    render: { drawCalls: info.render.calls, triangles: info.render.triangles, meshCount, geometries: info.memory.geometries },
+    render: { drawCalls: info.render.calls, triangles: info.render.triangles, meshCount, overlayMeshes, geometries: info.memory.geometries },
   };
 })()`);
 
@@ -457,7 +464,8 @@ const checks = [
   ['页面自测（runSelfTest）全部通过', S.h1.selfTestFailed.length === 0 && S.h1.selfTestChecks >= 15,
     `${S.h1.selfTestChecks} 条${S.h1.selfTestFailed.length ? '，失败：' + S.h1.selfTestFailed.join('、') : '，无失败项'}`],
   ['M25 draw call ≤ 20',             S.render.drawCalls <= 20,                             `${S.render.drawCalls} 次/帧`],
-  ['M25 只有 1 个 Mesh',             S.render.meshCount === 1,                             `${S.render.meshCount} 个`],
+  ['M25 星球主体合并成 1 个 Mesh',   S.render.meshCount - S.render.overlayMeshes === 1 && S.render.meshCount <= 3,
+    `共 ${S.render.meshCount} 个 = 星球主体 1 + 覆盖层 ${S.render.overlayMeshes}（河网/矿石）`],
   ['M26 纬度-温度单调性',             S.regression.tempMonoOK,                              'top→赤道 逐桶不上升'],
   ['M27 雨林不越界（|lat|>0.6 计数为 0）', S.regression.rainforestHighLat === 0,            `${S.regression.rainforestHighLat} 格，p95=${S.regression.rainforestLatP95}`],
   ['M28 冰原不越界（|lat|<0.85 计数为 0）', S.regression.iceLowLat === 0,                   `${S.regression.iceLowLat} 格`],

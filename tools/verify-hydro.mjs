@@ -283,6 +283,76 @@ const S = await evaluate(`(() => {
         return best;
       })(),
     },
+    /* --- ★ H3 河网渲染层（独立几何体）--- */
+    river: (() => {
+      const rs = P.river && P.river();
+      const rm = P.riverMesh && P.riverMesh();
+      if (!rs || !rm) return null;
+      const pos = rm.geometry.attributes.position;
+      let minR = Infinity, maxR = 0;
+      for (let i = 0; i < pos.count; i++) {
+        const r = Math.hypot(pos.getX(i), pos.getY(i), pos.getZ(i));
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+      }
+      const cells = [];
+      for (let i = 0; i < n; i++) if (isR[i]) cells.push(i);
+
+      /* M37 宽度—流量（Spearman）+ M32 河宽沿主下游回缩次数 */
+      const rank = (arr) => {
+        const idx = arr.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]);
+        const r = new Array(arr.length);
+        for (let i = 0; i < idx.length; i++) r[idx[i][1]] = i;
+        return r;
+      };
+      let rho = 1, widthDips = 0, maxWidthDipRel = 0;
+      if (cells.length > 2) {
+        const ra = rank(cells.map((i) => hy.accum[i]));
+        const rw = rank(cells.map((i) => rs.widths[i]));
+        const m = cells.length;
+        let d2 = 0;
+        for (let i = 0; i < m; i++) d2 += (ra[i] - rw[i]) ** 2;
+        rho = 1 - (6 * d2) / (m * (m * m - 1));
+        for (const i of cells) {
+          const d = hy.down[i];
+          if (d >= 0 && isR[d] && rs.widths[d] < rs.widths[i]) {
+            widthDips++;
+            maxWidthDipRel = Math.max(maxWidthDipRel, 1 - rs.widths[d] / rs.widths[i]);
+          }
+        }
+      }
+
+      /* M31 分叉比：Strahler 级数（在河格的流图上算，按 filled 上游优先递推） */
+      const order = new Int32Array(n);
+      const ord = cells.slice().sort((a, b) => hy.filled[b] - hy.filled[a]);
+      const byOrder = new Map();
+      for (const x of ord) {
+        let best = 0, ties = 0;
+        for (const k of hy.adj[x]) {
+          if (!isR[k] || hy.down[k] !== x) continue;
+          const o = order[k];
+          if (o > best) { best = o; ties = 1; } else if (o === best) ties++;
+        }
+        order[x] = best === 0 ? 1 : (ties >= 2 ? best + 1 : best);
+        byOrder.set(order[x], (byOrder.get(order[x]) || 0) + 1);
+      }
+      const orders = [...byOrder.keys()].sort((a, b) => a - b);
+      const bifurcation = [];
+      for (let i = 0; i < orders.length - 1; i++) {
+        bifurcation.push(+(byOrder.get(orders[i]) / byOrder.get(orders[i + 1])).toFixed(2));
+      }
+
+      return {
+        vertexCount: rs.vertexCount, triCount: rs.triCount, chains: rs.chains,
+        spacing: +rs.spacing.toFixed(5), eqMedian: +rs.eqMedian.toFixed(2), buildMs: rs.ms,
+        minRadius: +minR.toFixed(5), maxRadius: +maxR.toFixed(5),
+        material: rm.material.type, color: '#' + rm.material.color.getHexString(), visible: rm.visible,
+        gridFingerprintPct: rs.gridFingerprintPct, gridFingerprintRawPct: rs.gridFingerprintRawPct,
+        gridStraightPct: rs.gridStraightPct,
+        spearman: +rho.toFixed(4), widthDips, maxWidthDipRel: +maxWidthDipRel.toFixed(4),
+        strahlerOrders: orders, strahlerCounts: orders.map((o) => byOrder.get(o)), bifurcation,
+      };
+    })(),
     lakes: {
       count: hy.lakes.length, largest: lakeAreas[0] || 0, top5: lakeAreas.slice(0, 5),
       totalCells: lakeAreas.reduce((a, b) => a + b, 0),
@@ -307,7 +377,7 @@ fs.writeFileSync(path.join(OUT, 'hydro-stats.json'),
   JSON.stringify({ level: env.level, seed: env.seed, hydroMs: env.hydroMs, params: env.hydro, pruned: env.pruned, ...S }, null, 2), 'utf8');
 
 /* ---------- 判定 ---------- */
-const R = S.rivers, I = S.invariants;
+const R = S.rivers, I = S.invariants, RV = S.river;
 const checks = [
   // ---- 河网拓扑（★ 口径已改写，理由见文件头） ----
   ['M12 流图环数 = 0（河道不相交）',   R.flowCycles === 0,      `${R.flowCycles} 个｜v1 口径（格邻接）是 126 个闭环`],
@@ -331,6 +401,21 @@ const checks = [
     `${S.lakes.count} 个湖｜最大 ${S.lakes.largest} 格｜占陆地 ${S.lakes.pctOfLand}%｜isEndorheic 全为 null（H4 判定）`],
   ['页面自测（runSelfTest）全部通过',    S.selfTest && S.selfTest.failed.length === 0 && S.selfTest.checks >= 25,
     S.selfTest ? `${S.selfTest.checks} 条${S.selfTest.failed.length ? '，失败：' + S.selfTest.failed.join('、') : '，无失败项'}` : '未取到'],
+
+  // ---- ★ H3 河网渲染层（独立几何体，1 次 draw call）----
+  ['H3 河网几何体就位（独立 Mesh + 独立材质）', RV && RV.material === 'MeshBasicMaterial' && RV.visible === true,
+    RV ? `${RV.triCount} 三角形 / ${RV.vertexCount} 顶点 / ${RV.chains} 条链 · ${RV.material} ${RV.color} · 建模 ${RV.buildMs} ms` : '未取到'],
+  ['M31 河网分叉比（Strahler 最低阶）∈ [3,5]',
+    RV && RV.bifurcation.length > 0 && RV.bifurcation[0] >= 3 && RV.bifurcation[0] <= 5,
+    RV ? `各级格数 ${RV.strahlerCounts.join('/')} → Rb ${RV.bifurcation.join('/')}` : '未取到'],
+  ['M32 河宽沿主下游不明显收腰（最大回缩 ≤ 25%）', RV && RV.maxWidthDipRel <= 0.25,
+    RV ? `${RV.widthDips} 处回缩（占河格 ${(RV.widthDips / Math.max(1, R.V) * 100).toFixed(1)}%）｜最大幅度 ${(100 * RV.maxWidthDipRel).toFixed(1)}%` : '未取到'],
+  ['M33 入海率 ≥ 70%', R.reachMouthPct >= 70,
+    `${R.reachMouthPct}%（H3 还没有内流盆地，H4 起这个数才有信息量）`],
+  ['M35 河网不像六边形折线（格网指纹 ≤ 40%）', RV && RV.gridFingerprintPct <= 40,
+    RV ? `平滑后 ${RV.gridFingerprintPct}% ｜ 只有抖动、未平滑时 ${RV.gridFingerprintRawPct}%（直行段占 ${RV.gridStraightPct}%，已剔除）` : '未取到'],
+  ['M37 河宽与汇水面积单调相关（Spearman ≥ 0.9）', RV && RV.spearman >= 0.9,
+    RV ? `ρ = ${RV.spearman}` : '未取到'],
 ];
 let fail = 0;
 console.log('');
@@ -348,6 +433,10 @@ console.log(`★ H3 风险诊断「河格是线还是片」：平均度 ${R.cell
 console.log(`湖泊：${S.lakes.count} 个（最大 ${S.lakes.largest} 格，前 5 ${S.lakes.top5.join('/')}）· ` +
   `湖面共 ${S.lakes.totalCells} 格（占陆地 ${S.lakes.pctOfLand}%）· 最深 ${S.lakes.maxDepth}`);
 console.log(`depth 直方图（> 阈值的格数）：${S.depthHist.bins.map((b, i) => `${b}=${S.depthHist.counts[i]}`).join(' · ')}`);
+console.log(`河网几何体（★ H3）：${RV
+  ? `${RV.triCount} 三角形 / ${RV.vertexCount} 顶点 / ${RV.chains} 条链 · 格间距 ${RV.spacing} · ` +
+    `顶点半径 ∈ [${RV.minRadius}, ${RV.maxRadius}] · 材质 ${RV.material} ${RV.color}`
+  : '未建'}`);
 console.log(`耗时：水文数据层 ${env.hydroMs} ms`);
 console.log(`指标已写入 ${path.relative(ROOT, path.join(OUT, 'hydro-stats.json'))}`);
 console.log(fail === 0 ? `\n全部通过（${checks.length} 条）` : `\n${fail} 条未通过`);

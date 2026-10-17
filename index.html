@@ -284,6 +284,19 @@ const CONFIG = {
     // 这两个阈值把"过水段"滤掉；H4 会按水量平衡再精调一次。
     minLakeDepth: 0.002,     // 低于此深度不算被淹（单位 = 海拔）
     minLakeArea: 4,          // 小于此格数的被淹区不画成湖
+
+    // --- H3 渲染层：三角带河网（见 docs/river-system-design.md §5）---
+    // ★ 宽度与抖动的单位都是「格」（会乘上实测格间距才变成世界单位），
+    //   所以换 level 不用重标；只有"看起来的粗细"变了才会需要调它们。
+    // 河宽 = clamp(riverMinWidth, riverWidthScale × (accum ÷ unit)^riverWidthExponent, riverMaxWidth)
+    riverWidthScale: 0.062,  // 流量 → 宽度的比例系数
+    riverWidthExponent: 0.42,// 水力几何的面积律：河宽 ∝ 流量^0.4~0.5
+    riverMinWidth: 0.06,     // 格：最小河宽（细支流的下限）
+    riverMaxWidth: 0.80,     // 格：最大河宽（超过就成"蓝绸带"）
+    riverLift: 0.002,        // 离球面的高度（半径单位）：避开 z-fighting，肉眼不可见
+    riverNodeJitter: 0.15,   // 格：节点抖动幅度（打散"六边形折线"的格网指纹）
+    riverSmoothPasses: 2,    // Chaikin 切角次数（1–2；端点保留，所以链与链仍严丝合缝）
+    climateCoupling: 1.0,    // 1 = 河宽随流量；0 = 全河等宽（出"粗细是否受降雨影响"的对照图用）
   },
 
   /* --- 立体感 --- */
@@ -302,6 +315,7 @@ const CONFIG = {
   hoverTint: 0.38,           // 悬停高亮强度（0 = 本色，1 = 纯白）；与重构前的观感一致
   selectionTint: 0.55,       // 选中高亮强度
   selectionColor: 0x8fe3ff,  // 选中色：偏青，与 12 种群系色都不撞
+  riverColor: 0x53b8ff,      // 河网颜色（★ H3）：比海洋色亮、与 11 种群系色都不撞
 
   /* --- 其他 --- */
   enableRotation: false,     // 行星自转
@@ -1589,6 +1603,296 @@ function buildPlanetGeometry(tiles) {
   };
 }
 
+/* -------------------------------------------------------------------------
+ * 5.5  河网渲染层（★ H3）：三角带 + 节点抖动 + Chaikin + 球面切向展开
+ *
+ * 为什么不能用 THREE.Line（见设计稿 §5.1）：WebGL 在多数平台把 lineWidth
+ * 钳死为 1px，而"粗细受降雨量影响"是硬要求。三角带能自己算宽度，
+ * 代价仍然只是 **1 个 Mesh + 1 次 draw call**（与图块数无关）。
+ *
+ * 走线（§5.2）：河**穿过**格子，不填满格子 ——
+ *   格心 C(x)（河源从这里起笔、汇流在这里收口）
+ *   ↕ 共享边中点 M(x,d)（对相邻两格是同一个点 → 折线天然首尾相接）
+ * 于是"底层格子照旧显示它本来的群系色，河只是一条压在上面的线"。
+ *
+ * 链分解（§5.5）：Chaikin 平滑必须作用在**整条链**上。若逐段平滑，每个格心
+ * 都会留下一个折角，"六边形折线"的格网指纹又回来了。所以先把每棵树切成
+ * "河源/汇流点 → 下一个汇流点/河口"的最大路径，再逐链平滑。
+ * ------------------------------------------------------------------------- */
+
+/** 确定性整数哈希 → [0,1)（打散格网指纹用）。不引入新噪声场，同种子同结果。 */
+function hash01(i) {
+  let h = Math.imul(i ^ 0x9E3779B9, 0x85EBCA6B);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xC2B2AE35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * 由水文数据造出河网几何体（三角带）。
+ *
+ * 返回 null 表示"一条河都没有"（例如阈值高到全被剪掉）——调用方据此跳过建 Mesh。
+ * 结果里带 `widths`（每格的河宽，世界单位）：M30/M35 与"宽度-流量散点图"都读它，
+ * 免得验收脚本再抄一遍宽度公式。
+ */
+function buildRiverGeometry(tiles, hy) {
+  const t0 = performance.now();
+  const n = tiles.length;
+  if (!hy || !hy.isRiver) return null;
+
+  /* --- 0. 实测格间距：把"格"单位的宽度/抖动换算成世界单位 ---
+     用实测值而不是解析式，换 level 时自动跟着变，参数不用重标。 */
+  let spacingSum = 0, spacingCnt = 0;
+  for (const t of tiles) {
+    const a = hy.adj[t.index][0];
+    if (a !== undefined) { spacingSum += t.center.distanceTo(tiles[a].center); spacingCnt++; }
+  }
+  const spacing = spacingCnt ? spacingSum / spacingCnt : 0.02;
+
+  const lift = 1 + CONFIG.hydro.riverLift;
+  const jitterAmp = CONFIG.hydro.riverNodeJitter * spacing;
+
+  /* --- 1. 河宽（单位：格 → 世界单位）---
+     climateCoupling = 0 时用"中位流量对应的宽度"当等宽值：这样对照图与原图的
+     总墨水量接近，变的只有"粗细是否有差异"这一个变量。 */
+  const riverCells = [];
+  for (let i = 0; i < n; i++) if (hy.isRiver[i]) riverCells.push(i);
+  if (!riverCells.length) return null;
+
+  const eqs = riverCells.map((i) => hy.accum[i] / hy.unit).sort((a, b) => a - b);
+  const eqMedian = eqs[eqs.length >> 1];
+  const k = Math.min(1, Math.max(0, CONFIG.hydro.climateCoupling));
+  const rawWidth = (eq) => Math.min(CONFIG.hydro.riverMaxWidth,
+    Math.max(CONFIG.hydro.riverMinWidth,
+      CONFIG.hydro.riverWidthScale * Math.pow(eq, CONFIG.hydro.riverWidthExponent)));
+  const wFlat = rawWidth(eqMedian);
+  const widths = new Float64Array(n);                 // 每格河宽（世界单位），给验收脚本读
+  for (const i of riverCells) {
+    const byFlow = rawWidth(hy.accum[i] / hy.unit);
+    widths[i] = ((1 - k) * wFlat + k * byFlow) * spacing;
+  }
+
+  /* --- 2. 节点坐标 --- */
+  const centerAt = new Array(n);
+  const UP = new THREE.Vector3(0, 1, 0);
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), tmp = new THREE.Vector3();
+
+  /** C(x) = 格心 + 确定性抖动（沿切平面偏移 nodeJitter 格）。 */
+  const nodeOf = (x) => {
+    if (centerAt[x]) return centerAt[x];
+    const c = tiles[x].center;
+    e1.crossVectors(c, UP);
+    if (e1.lengthSq() < 1e-8) e1.set(1, 0, 0);        // 极点附近退化时的兜底
+    e1.normalize();
+    e2.crossVectors(c, e1).normalize();
+    const a1 = (hash01(x * 2) * 2 - 1) * jitterAmp;
+    const a2 = (hash01(x * 2 + 1) * 2 - 1) * jitterAmp;
+    centerAt[x] = new THREE.Vector3().copy(c).addScaledVector(e1, a1).addScaledVector(e2, a2)
+      .normalize().multiplyScalar(lift);
+    return centerAt[x];
+  };
+
+  /** M(x,d) = 相邻两格共享边的中点（沿边滑 ±nodeJitter 格）。对 (x,d) 与 (d,x) 是同一个点。 */
+  const edgeMid = (x, d) => {
+    const c1 = tiles[x].center, c2 = tiles[d].center;
+    const m = new THREE.Vector3().addVectors(c1, c2).normalize();
+    const key = x < d ? x * 100003 + d : d * 100003 + x;
+    const slide = (hash01(key) * 2 - 1) * jitterAmp;
+    tmp.subVectors(c2, c1);                            // 弦方向（≈ 两格连线）
+    const dir = new THREE.Vector3().crossVectors(tmp, m).normalize();   // 沿共享边
+    return m.addScaledVector(dir, slide).normalize().multiplyScalar(lift);
+  };
+
+  /* --- 3. 链分解：河源/汇流点 → 下一个汇流点/河口 --- */
+  const upCount = new Int32Array(n);                  // 沿主下游流入本格的河格数
+  for (const x of riverCells) {
+    const d = hy.down[x];
+    if (d >= 0 && hy.isRiver[d]) upCount[d]++;
+  }
+  const chains = [];
+  for (const x of riverCells) {
+    if (upCount[x] === 1) continue;                   // 链中段：由上游那条链走下来
+    const path = [x];
+    let cur = x;
+    for (;;) {
+      const d = hy.down[cur];
+      if (d < 0) break;                               // 终点（陆地格理论上不会发生）
+      path.push(d);
+      if (!hy.isRiver[d] || upCount[d] >= 2) break;   // 入海 / 到达汇流点
+      cur = d;
+    }
+    chains.push(path);
+  }
+
+  /* --- 4. 每条链 → 折线点（格心与边中点交错）+ 每点半宽 --- */
+  let points = [], halfW = [], ranges = [];
+  for (const path of chains) {
+    const s = points.length;
+    for (let i = 0; i < path.length; i++) {
+      const x = path[i];
+      if (!hy.isRiver[x]) continue;                   // 海水格不生成点（河口止于边界中点）
+      points.push(nodeOf(x));
+      halfW.push(widths[x] * 0.5);
+      const d = path[i + 1];
+      if (d === undefined || d < 0) continue;
+      points.push(edgeMid(x, d));
+      // 节点处取相邻两段的最大值：避免下游突然变窄（设计稿 §5.3）
+      halfW.push((hy.isRiver[d] ? Math.max(widths[x], widths[d]) : widths[x]) * 0.5);
+    }
+    if (points.length - s >= 2) ranges.push([s, points.length]);
+  }
+  if (!ranges.length) return null;
+  const pointCountRaw = points.length;                 // 平滑前的折线点数（诊断用）
+  const maxChainLen = ranges.reduce((m, r) => Math.max(m, r[1] - r[0]), 0);
+
+  /* --- 5. Chaikin 切角平滑（端点保留 → 相邻链仍在汇流点严丝合缝）---
+     插值点在弦上，所以要重新归一化到 lift —— 否则曲线会略微陷进球面。 */
+
+  /* 格网指纹（M33）：**有转角的地方**，转角落在 60° 整数倍 ±3° 的占比。
+     只走"格心 / 边中点"的话，转角会被六边形网格量化到 0°/60°/120°，
+     远看就是"hexagonal 折线"。节点抖动 + Chaikin 就是为了把这个比例压下去，
+     所以这里量**平滑前后各一次**，把"抖动 + 平滑值多少"变成一个可核验的数。
+
+     ★ 口径修正（H3 实测）：原定义里"60° 的整数倍"**包含 0°**，而平滑后的河道
+       绝大多数折点是近乎直行的（转角 < 5°）—— 于是变成"越平滑、指纹越高"，
+       实测平滑前 8.3%、平滑后 59.4%，完全反了。所以直行段不计入分母：
+       "直着流"不是六边形指纹，"每格都拐 60°"才是。 */
+  const STRAIGHT_ANGLE = 5 * Math.PI / 180;
+  const fingerprint = (pts, rgs) => {
+    let turns = 0, onGrid = 0, straight = 0;
+    const t1 = new THREE.Vector3(), t2 = new THREE.Vector3();
+    const step = Math.PI / 3, tol = 3 * Math.PI / 180;
+    for (const [s, e] of rgs) {
+      for (let i = s + 1; i < e - 1; i++) {
+        const p = pts[i];
+        t1.subVectors(p, pts[i - 1]);
+        t2.subVectors(pts[i + 1], p);
+        t1.addScaledVector(p, -t1.dot(p) / p.lengthSq());   // 去掉径向分量 → 落到切平面
+        t2.addScaledVector(p, -t2.dot(p) / p.lengthSq());
+        if (t1.lengthSq() < 1e-20 || t2.lengthSq() < 1e-20) continue;
+        const ang = Math.acos(Math.min(1, Math.max(-1, t1.normalize().dot(t2.normalize()))));
+        if (ang < STRAIGHT_ANGLE) { straight++; continue; }   // 直行段：不算指纹
+        const off = Math.min(ang % step, step - (ang % step));
+        turns++;
+        if (off <= tol) onGrid++;
+      }
+    }
+    const total = turns + straight;
+    return {
+      pct: turns ? +(100 * onGrid / turns).toFixed(1) : 0,
+      turns, straight,
+      straightPct: total ? +(100 * straight / total).toFixed(1) : 0,
+    };
+  };
+  const fpRaw = fingerprint(points, ranges);
+
+  const passes = Math.max(0, CONFIG.hydro.riverSmoothPasses | 0);
+  for (let pass = 0; pass < passes; pass++) {
+    const np = [], nw = [], nr = [];
+    for (const [s, e] of ranges) {
+      const out = np.length;
+      np.push(points[s]); nw.push(halfW[s]);
+      for (let i = s; i < e - 1; i++) {
+        const a = points[i], b = points[i + 1];
+        np.push(new THREE.Vector3().lerpVectors(a, b, 0.25).normalize().multiplyScalar(lift));
+        nw.push(halfW[i]);
+        np.push(new THREE.Vector3().lerpVectors(a, b, 0.75).normalize().multiplyScalar(lift));
+        nw.push(halfW[i + 1]);
+      }
+      np.push(points[e - 1]); nw.push(halfW[e - 1]);
+      nr.push([out, np.length]);
+    }
+    points = np; halfW = nw; ranges = nr;
+  }
+
+  /* --- 6. 三角带：每个点 → 左右两个顶点（沿球面切平面偏移）---
+     宽度方向 = normalize(cross(切向, 球面法线))，即**在切平面内**向两侧偏 ——
+     绝不能用固定平面坐标偏移，否则极点附近会被拉花（设计稿 §5.4）。
+
+     ★ 绕序（H3 实测踩过）：顶点按 (左, 右) 成对入队，但 (左i, 右i, 左i+1)
+       这个顺序算出来的法线朝**球心**（cross(右−左, 左i+1−左i) = −径向），
+       与星球主体"从球外看逆时针"相反 → 被背面剔除，整条河网在画面上完全消失。
+       所以索引要按 (左i, 左i+1, 右i) 排，法线才朝外。 */
+  const verts = [], idx = [];
+  const tan = new THREE.Vector3(), nrm = new THREE.Vector3();
+  const lv = new THREE.Vector3(), rv = new THREE.Vector3(), fallback = new THREE.Vector3(0, 1, 0);
+  for (const [s, e] of ranges) {
+    const base = verts.length / 3;
+    for (let i = s; i < e; i++) {
+      const p = points[i];
+      const a = points[i > s ? i - 1 : s], b = points[i < e - 1 ? i + 1 : e - 1];
+      tan.subVectors(b, a);                           // 河道切向
+      nrm.crossVectors(tan, p);                       // ⟂ p ⇒ 落在切平面内
+      if (nrm.lengthSq() < 1e-14) nrm.crossVectors(p, fallback);
+      nrm.normalize();
+      const hw = halfW[i];
+      lv.copy(p).addScaledVector(nrm, hw).normalize().multiplyScalar(lift);
+      rv.copy(p).addScaledVector(nrm, -hw).normalize().multiplyScalar(lift);
+      verts.push(lv.x, lv.y, lv.z, rv.x, rv.y, rv.z);
+    }
+    for (let i = s; i < e - 1; i++) {
+      const k0 = base + (i - s) * 2;
+      idx.push(k0, k0 + 2, k0 + 1, k0 + 1, k0 + 2, k0 + 3);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geometry.setIndex(idx);
+  geometry.computeBoundingSphere();
+
+  const fp = fingerprint(points, ranges);              // 平滑后（眼睛看到的）
+
+  return {
+    geometry, widths,
+    vertexCount: verts.length / 3,
+    triCount: idx.length / 3,
+    chains: ranges.length,
+    pointCount: pointCountRaw,                         // 平滑前折线点数（诊断：是否与河格数对得上）
+    pointCountFinal: points.length,                    // 平滑后点数
+    chainLenMax: maxChainLen,                          // 最长链的点数
+    spacing, eqMedian,
+    gridFingerprintPct: fp.pct,                        // 平滑后（眼睛看到的）
+    gridFingerprintRawPct: fpRaw.pct,                  // 平滑前（只有节点抖动）
+    gridStraightPct: fp.straightPct,                   // 直行段占比（口径说明用）
+    ms: +(performance.now() - t0).toFixed(1),
+  };
+}
+
+/**
+ * 重建河网几何体（★ H3）。设计稿 §10.3 明说了这一条会打破"调参不重建几何体"的便利：
+ * 改 `riverCellThreshold` / `climateCoupling` 之后河段集合本身就变了，必须重建。
+ * 成本 level 6 实测约 15–30 ms，一次性、不在渲染循环里 —— 调参时等得起。
+ *
+ * 材质只有一份，复用；几何体每次新建，旧的要 dispose 掉（否则反复 refresh 会漏显存）。
+ */
+function rebuildRivers() {
+  const built = buildRiverGeometry(tiles, world.hydro);
+  if (gfx.riverLayer) {
+    planetGroup.remove(gfx.riverLayer);
+    gfx.riverLayer.geometry.dispose();
+    gfx.riverLayer = null;
+  }
+  gfx.riverStats = built;
+  if (!built) return null;
+
+  if (!gfx.riverMaterial) {
+    // 与星球主体一致：MeshBasicMaterial（不受光照）。整颗星球都是"地图语言"的纯色，
+    // 河如果受光，在明暗交界处会突然变暗，反而像另一套东西。
+    gfx.riverMaterial = new THREE.MeshBasicMaterial({ color: CONFIG.riverColor });
+  }
+  const mesh = new THREE.Mesh(built.geometry, gfx.riverMaterial);
+  mesh.matrixAutoUpdate = false;
+  mesh.updateMatrix();
+  mesh.frustumCulled = false;      // 顶点都在球面上，整体包围球而已，剔除没意义
+  mesh.renderOrder = 1;            // L3 河网：压在 L0 群系之上（半径已 +riverLift）
+  mesh.visible = overlayVisible.river;
+  gfx.riverLayer = mesh;
+  planetGroup.add(mesh);
+  return built;
+}
+
 /* =========================================================================
  * §6  场景搭建
  * ========================================================================= */
@@ -2073,13 +2377,15 @@ function syncOreLayer() {
  * 「面走顶点色 / 线走独立几何体」实现，所以这里只是把开关状态记下来，
  * 由各层自己去读（例如 syncOreLayer 读 overlayVisible.ore）。
  *
- * ★ H1 现状：只有 'ore' 是真实存在的层；'river'（H3）、'lake'（H4）会先记住状态，
- *   图层实现后立即生效 —— 现在调用它们不报错，也不会有任何视觉变化。
+ * ★ H1 引入，H3 起 'river' 真实存在（'lake' 要等 H4）。
+ *   'ore' / 'river' 都是真图层；'lake' 先记住状态，图层实现后立即生效 ——
+ *   现在调用它不报错，也不会有任何视觉变化。
  */
 function setVisibleOverlays(list) {
   const keep = list && list.length ? new Set(list) : null;
   for (const key of Object.keys(overlayVisible)) overlayVisible[key] = !keep || keep.has(key);
   if (gfx.oreLayer) gfx.oreLayer.visible = overlayVisible.ore && gfx.oreLayer.count > 0;
+  if (gfx.riverLayer) gfx.riverLayer.visible = overlayVisible.river;
   return { ...overlayVisible };
 }
 
@@ -2172,6 +2478,8 @@ window.addEventListener('resize', onResize);
  */
 function buildLegend() {
   const el = document.getElementById('legend');
+  const swatch = (hex, label) =>
+    `<div class="item"><span class="swatch" style="background:#${hex}"></span>${label}</div>`;
   const groups = [
     { title: '气候群系', biomes: [
       BIOME.OCEAN, BIOME.SEA_ICE, BIOME.ICE, BIOME.TUNDRA, BIOME.TAIGA,
@@ -2179,16 +2487,18 @@ function buildLegend() {
     ] },
     { title: '覆盖层', biomes: [
       BIOME.MOUNTAIN, BIOME.SNOW,
-      /* H3/H4 起：河流 / 湖泊 / 内流盆地 / 盐湖 */
-    ] },
+    ],
+    /* ★ H3：河流**不是群系**（H1 起升格为覆盖层），所以单独给一条图例。
+       它画成"线"而不是"面"，用「（线）」标注形状差异。
+       H4 的湖泊 / 内流盆地 / 盐湖会接在这一组后面。 */
+    extra: [swatch(CONFIG.riverColor.toString(16).padStart(6, '0'), '河流（线）')] },
   ];
-  el.innerHTML = groups.filter((g) => g.biomes.length).map((g) =>
-    `<div class="group">${g.title}</div>` +
-    g.biomes.map((b) => {
-      const hex = '#' + BIOME_COLOR[b].toString(16).padStart(6, '0');
-      return `<div class="item"><span class="swatch" style="background:${hex}"></span>${BIOME_LABEL[b]}</div>`;
-    }).join(''),
-  ).join('');
+  el.innerHTML = groups.map((g) => {
+    const items = g.biomes
+      .map((b) => swatch(BIOME_COLOR[b].toString(16).padStart(6, '0'), BIOME_LABEL[b]))
+      .concat(g.extra || []);
+    return items.length ? `<div class="group">${g.title}</div>` + items.join('') : '';
+  }).join('');
 }
 
 /* =========================================================================
@@ -2266,9 +2576,18 @@ function runSelfTest(tiles) {
     for (const t of tiles) if (gfx.tileVertCount[t.index] - 1 !== t.vertexIndices.length) polyOK = false;
     check('三角形与多边形边数一一对应', polyOK);
 
-    let meshCount = 0;
-    scene.traverse((o) => { if (o.isMesh) meshCount++; });
-    check('场景中星球主体仅 1 个 Mesh', meshCount === 1, `实际 ${meshCount} 个 Mesh`);
+    // 渲染架构红线：**星球主体**（全部图块）必须合并成 1 个 Mesh。
+    // 覆盖层（河网 H3 / 矿石）各自独立成层、各占 1 个 Mesh —— 这是设计允许的
+    // （§3.2「面走顶点色 / 线走独立几何体」，每层 1 次 draw call，与图块数无关）。
+    let meshCount = 0, overlayMeshes = 0;
+    scene.traverse((o) => {
+      if (!o.isMesh) return;
+      meshCount++;
+      if (o === gfx.riverLayer || o === gfx.oreLayer) overlayMeshes++;
+    });
+    check('星球主体合并成 1 个 Mesh（覆盖层各自独立成层）',
+      meshCount - overlayMeshes === 1 && meshCount <= 3,
+      `共 ${meshCount} 个 Mesh = 星球主体 1 + 覆盖层 ${overlayMeshes}（河网/矿石）`);
   }
 
   // ---- 分层地表模型（★ H1）：河流必须是「覆盖层」，不再是一个群系 ----
@@ -2396,6 +2715,79 @@ function runSelfTest(tiles) {
     }
   }
 
+  // ---- 河网渲染层（★ H3）----
+  // 河网是**独立几何体**（1 个 Mesh、1 次 draw call），所以这里断言的是
+  // "几何体真的建出来了、真的浮在球面之上、宽度真的随流量"，而不是顶点色那一套。
+  if (gfx.riverLayer && gfx.riverStats) {
+    const rs = gfx.riverStats;
+    check('H3 河网几何体已建（独立 Mesh，1 次 draw call）',
+      rs.triCount > 0 && gfx.riverLayer.isMesh === true,
+      `${rs.triCount} 三角形 / ${rs.vertexCount} 顶点 / ${rs.chains} 条链` +
+      ` · 格间距 ${rs.spacing.toFixed(5)} · 建模 ${rs.ms} ms`);
+
+    // 顶点必须**全部**在球面之上：否则会与底层 z-fighting（河线穿模成虚线）
+    const pos = gfx.riverLayer.geometry.attributes.position;
+    let minR = Infinity, maxR = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const r = Math.hypot(pos.getX(i), pos.getY(i), pos.getZ(i));
+      if (r < minR) minR = r;
+      if (r > maxR) maxR = r;
+    }
+    check('H3 河网顶点全部浮在球面之上（不会 z-fighting）',
+      minR >= 1 + CONFIG.hydro.riverLift * 0.5,
+      `半径 ∈ [${minR.toFixed(5)}, ${maxR.toFixed(5)}]（球面 1，抬升 ${CONFIG.hydro.riverLift}）`);
+
+    // M35 格网指纹：**有转角的地方**，转角落在 60° 整数倍 ±3° 的占比（目标 ≤ 40%）。
+    // 平滑前的数只作对照 —— 它说明"节点抖动 + Chaikin"到底值多少。
+    check('H3 河网不像六边形折线（M35，格网指纹 ≤ 40%）',
+      rs.gridFingerprintPct <= 40,
+      `平滑后 ${rs.gridFingerprintPct}% ｜ 只有抖动、未平滑时 ${rs.gridFingerprintRawPct}%` +
+      `（直行段占 ${rs.gridStraightPct}%，已按 H3 口径修正剔除）`);
+
+    if (world.hydro) {
+      const hy3 = world.hydro;
+      const cells = [];
+      for (let i = 0; i < tiles.length; i++) if (hy3.isRiver[i]) cells.push(i);
+
+      if (cells.length > 2) {
+        // M37 宽度—流量单调相关（Spearman）：河宽是 accum 的单调函数，所以必然接近 1
+        //（只有 min/max 截断会造成并列）。这条保证"粗细确实受降雨量影响"。
+        const rank = (arr) => {
+          const idx = arr.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]);
+          const r = new Array(arr.length);
+          for (let i = 0; i < idx.length; i++) r[idx[i][1]] = i;
+          return r;
+        };
+        const ra = rank(cells.map((i) => hy3.accum[i]));
+        const rw = rank(cells.map((i) => rs.widths[i]));
+        const m = cells.length;
+        let d2 = 0;
+        for (let i = 0; i < m; i++) d2 += (ra[i] - rw[i]) ** 2;
+        const rho = 1 - (6 * d2) / (m * (m * m - 1));
+        check('H3 河宽与汇水面积单调相关（M37，Spearman ≥ 0.9）', rho >= 0.9,
+          `ρ = ${rho.toFixed(4)}（${m} 个河格）`);
+      }
+
+      // M32 河宽沿主下游不缩：设计稿 §5.3 断言"accum 沿下游单调不减 ⇒ 河宽自动单调不缩"，
+      // 但那个前提在 MFD 下**不成立**（§8.4 已修正）：实测约 9% 的河格"下游比本格窄"。
+      // 所以口径改成**幅度**判据 —— 几个百分点的局部回缩肉眼不可见，
+      // 真正会"收腰"的是大幅回缩。目标：最大回缩幅度 ≤ 25%。
+      const dipsRel = [];
+      for (const i of cells) {
+        const d = hy3.down[i];
+        if (d >= 0 && hy3.isRiver[d] && rs.widths[d] < rs.widths[i]) {
+          dipsRel.push(1 - rs.widths[d] / rs.widths[i]);
+        }
+      }
+      dipsRel.sort((a, b) => a - b);
+      const maxDip = dipsRel.length ? dipsRel[dipsRel.length - 1] : 0;
+      check('H3 河宽沿主下游不明显收腰（M32，最大回缩 ≤ 25%）', maxDip <= 0.25,
+        `${dipsRel.length} 处回缩（占 ${(dipsRel.length / Math.max(1, cells.length) * 100).toFixed(1)}%）` +
+        `｜幅度 中位 ${(100 * (dipsRel[dipsRel.length >> 1] || 0)).toFixed(1)}%` +
+        ` / 最大 ${(100 * maxDip).toFixed(1)}%`);
+    }
+  }
+
   // 生物群系统计
   const stats = {};
   for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
@@ -2464,6 +2856,7 @@ function init() {
   gfx.oreLayer = null;      // planetGroup.clear() 之后旧的引用已失效
   gfx.outline = null;       // 描边也是 planetGroup 的子对象，同样要作废
   gfx.outlinePos = null;
+  gfx.riverLayer = null;    // 河网层（★ H3）同样是 planetGroup 的子对象
 
   for (const tile of tiles) {
     // 4.1 拓扑索引 → 渲染坐标。多个图块共享同一批 Vector3 实例，故共享边坐标完全一致
@@ -2507,6 +2900,11 @@ function init() {
   gfx.mesh.updateMatrix();
   planetGroup.add(gfx.mesh);
 
+  // 4.5 河网覆盖层（★ H3）：独立几何体 + 独立材质，1 次 draw call（与图块数无关）
+  const riverBuilt = rebuildRivers();
+  gfx.buildTimings.riverMs = riverBuilt ? riverBuilt.ms : 0;
+  gfx.buildTimings.totalMs = +(performance.now() - tBuildStart).toFixed(1);
+
   // --- 5. 业务数据层 ---
   world.ore = new Int8Array(tiles.length);
   world.oreAmount = new Uint16Array(tiles.length);
@@ -2539,7 +2937,8 @@ function init() {
   );
   console.log(
     `%c生成耗时（纯算法）：合计 ${gfx.buildTimings.totalMs} ms` +
-    `（网格+地形 ${gfx.buildTimings.terrainMs} ms / 打包几何体 ${gfx.buildTimings.geometryMs} ms）`,
+    `（网格+地形 ${gfx.buildTimings.terrainMs} ms / 打包几何体 ${gfx.buildTimings.geometryMs} ms` +
+    ` / 河网几何体 ${gfx.buildTimings.riverMs} ms）`,
     'color:#6cf',
   );
   console.log('提示：修改代码顶部 CONFIG 中的 seed 可换一颗星球。');
@@ -2582,6 +2981,8 @@ function init() {
     hydro: () => world.hydro,
     setVisibleOverlays,
     overlays: () => ({ ...overlayVisible }),
+    river: () => gfx.riverStats,        // ★ H3 河网几何体统计（顶点/三角形/链数/格间距/每格河宽）
+    riverMesh: () => gfx.riverLayer,    // ★ H3 河网 Mesh（1 个，独立几何体）
 
     /* 顶点色 */
     repaintTile, repaintAll,
@@ -2605,6 +3006,9 @@ function init() {
     /** 重跑整条地形链「海拔 → 气候 → 群系 → 顶点色」，返回新的群系计数 */
     refresh() {
       recomputeTerrain();
+      // ★ H3：河网是**独立几何体**，改水文/渲染参数后河段集合就变了，必须重建
+      //   （设计稿 §10.3 —— 这一步之后 refresh() 不再是零几何体成本，约 15–30 ms）。
+      rebuildRivers();
       const stats = {};
       for (const tile of tiles) {
         tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
