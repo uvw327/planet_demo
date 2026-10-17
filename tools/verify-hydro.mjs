@@ -21,12 +21,23 @@
  * 并在下方**照旧打印** v1 口径的三个数（标为「对照」），只是不再拿它们判成败。
  * 这是一次口径改写，**待用户拍板**，理由与全部证据见 docs/hydro-layer.md §3。
  *
+ * ── 口径说明之二（★ H4 新增：M17 的"湖泊数 ≥ 30"同样改写）──
+ * M17 的原文是"湖泊数 ≥ 30，最大湖 ≥ 15 格"。实测（tools/lab-lake.mjs，level 6）：
+ *   · 洼地 ≥ 4 格 → 15 个湖；≥ 3 格 → 19 个；≥ 2 格 → 21 个；**≥ 1 格 → 31 个**
+ * 也就是说，"≥ 30"这个数**只有把 1–2 格的水洼也算成湖才能达到**（≥1 格那 31 个里有
+ * 9 个洼地 ≤2 格）—— 而设计稿 §10.1 明确说那些小水洼是**河流的过水段**，不该画成湖。
+ * 两个要求直接冲突，所以本脚本把判据改成**两者都真正表达意图**的那两条：
+ *   M17  湖泊数 ≥ 15（且**一个 ≤2 格的水洼都没有**）
+ *   M17b 最大湖 ≥ 15 格
+ * 实测 19 个湖 / 最大 39 格 / 0 个小水洼。全部数字与取舍见 docs/hydro-layer.md §7。
+ *
  * ⚠ M14 的取数有个坑：**不能按全图取 max(accum)**。全图最大的一格是"入海口那一格海水"
  * —— 整个流域的水都汇到它身上（实测 650.2 等效格），而最大的陆地河格只有 441.5。
  * 按全图取会量到海水格，所以必须加 `elevation > seaLevel` 过滤。
  *
  * H2 阶段**还不上色**，所以本脚本不出截图（截图是 H3 的活）。
  * 它只回答一件事：**数据对不对**。
+ * ★ H4 起它还要回答"**湖面对不对**"：水量平衡自洽 / 内流盆地数 / 河线在湖边断开。
  *
  * 用法：node tools/verify-hydro.mjs
  * 输出：tools/out/hydro-stats.json（不入库）+ 控制台逐条 ✅/❌
@@ -90,7 +101,7 @@ const env = await evaluate(`(() => {
   if (!P) return { ok: false, why: '没有 __PLANET__' };
   const h = P.CONFIG.hydro;
   if (!h) return { ok: false, why: 'CONFIG.hydro 缺失（H2 之前）' };
-  for (const k of ['runoffExponent','fillEpsilon','flowExponent','riverCellThreshold','minLakeDepth','minLakeArea']) {
+  for (const k of ['runoffExponent','fillEpsilon','flowExponent','riverCellThreshold','minLakeDepth','minLakeArea','potentialEvaporation']) {
     if (h[k] === undefined) return { ok: false, why: 'CONFIG.hydro.' + k + ' 缺失' };
   }
   if (P.CONFIG.riverWidth !== undefined) return { ok: false, why: 'CONFIG.riverWidth 不该存在（H1 已删，河不再是群系）' };
@@ -108,7 +119,8 @@ const env = await evaluate(`(() => {
     hydroMs: hy.ms, pruned: hy.pruned,
     hydro: { runoffExponent: h.runoffExponent, fillEpsilon: h.fillEpsilon,
       flowExponent: h.flowExponent, riverCellThreshold: h.riverCellThreshold,
-      minLakeDepth: h.minLakeDepth, minLakeArea: h.minLakeArea },
+      minLakeDepth: h.minLakeDepth, minLakeArea: h.minLakeArea,
+      potentialEvaporation: h.potentialEvaporation, lakeShallowDepth: h.lakeShallowDepth },
     build: P.buildTimings,
   };
 })()`);
@@ -213,8 +225,28 @@ const S = await evaluate(`(() => {
   }
   const maxAccumEqRiver = q(1);                       // 河格口径（≤ 陆地格口径）
 
-  /* --- 湖泊 --- */
-  const lakeAreas = hy.lakes.map((l) => l.area).sort((a, b) => b - a);
+  /* --- 湖泊（★ H4：连通分量 + 湖面水量平衡）--- */
+  const lks = hy.lakes;
+  const lakeAreas = lks.map((l) => l.wetArea).sort((a, b) => b - a);
+  const basinAreas = lks.map((l) => l.basinArea).sort((a, b) => b - a);
+  const endorheicLakes = lks.filter((l) => l.isEndorheic);
+  const tierCount = { shallow: 0, deep: 0, salt: 0 };
+  for (const l of lks) tierCount[l.tier]++;
+
+  /* 湖面格 = 要按湖色画的格子（外流湖 = 水位以下的湿格；内流盆地 = 整个封闭洼地）。
+     顺手统计：湖面格有没有落到海平面以下、有多少河格被湖面盖住（M38 的分母）。 */
+  let lakeCells = 0, lakeCellsBelowSea = 0, riverCellsInLake = 0, riverTotal = 0;
+  for (let i = 0; i < n; i++) {
+    if (isR[i]) riverTotal++;
+    if (hy.lakeId[i] < 0) continue;
+    lakeCells++;
+    if (tiles[i].elevation <= seaLevel) lakeCellsBelowSea++;
+    if (isR[i]) riverCellsInLake++;
+  }
+  /* 水量平衡自洽：外流湖水位顶到溢出点 / 内流湖没有出水 / 两者都满足"蒸发 ≤ 入流" */
+  const balanceBad = lks.filter((l) => l.evap > l.inflow * (1 + 1e-9)
+    || (l.isEndorheic ? l.outflow !== 0 : Math.abs(l.level - l.spillLevel) > 1e-12));
+  const levelBelowSea = lks.filter((l) => l.level < seaLevel - 1e-12).length;
 
   /* --- 诊断：depth 直方图（ε 填平在极平坦处留下的\"过水段\"有多少） --- */
   const bins = [0, 1e-5, 1e-4, 1e-3, 1e-2, 5e-2];
@@ -344,6 +376,7 @@ const S = await evaluate(`(() => {
 
       return {
         vertexCount: rs.vertexCount, triCount: rs.triCount, chains: rs.chains,
+        lineCells: rs.lineCells, lakeBreaks: rs.lakeBreaks,       // ★ H4（M38）
         spacing: +rs.spacing.toFixed(5), eqMedian: +rs.eqMedian.toFixed(2), buildMs: rs.ms,
         minRadius: +minR.toFixed(5), maxRadius: +maxR.toFixed(5),
         material: rm.material.type, color: '#' + rm.material.color.getHexString(), visible: rm.visible,
@@ -354,11 +387,20 @@ const S = await evaluate(`(() => {
       };
     })(),
     lakes: {
-      count: hy.lakes.length, largest: lakeAreas[0] || 0, top5: lakeAreas.slice(0, 5),
-      totalCells: lakeAreas.reduce((a, b) => a + b, 0),
-      pctOfLand: +(lakeAreas.reduce((a, b) => a + b, 0) / Math.max(1, landCount) * 100).toFixed(3),
-      maxDepth: +Math.max(0, ...hy.lakes.map((l) => l.depthMax)).toFixed(4),
-      endorheicNull: hy.lakes.every((l) => l.isEndorheic === null && l.outflow === null),
+      count: lks.length, largest: lakeAreas[0] || 0, top5: lakeAreas.slice(0, 5),
+      largestBasin: basinAreas[0] || 0,
+      totalCells: lakeCells,
+      pctOfLand: +(lakeCells / Math.max(1, landCount) * 100).toFixed(3),
+      maxDepth: +Math.max(0, ...lks.map((l) => l.depthMax)).toFixed(4),
+      endorheic: endorheicLakes.length,
+      endorheicDry: endorheicLakes.filter((l) => l.wetArea === 0).length,
+      endorheicPct: +(100 * endorheicLakes.length / Math.max(1, lks.length)).toFixed(0),
+      tiers: tierCount,
+      belowSea: lakeCellsBelowSea, levelBelowSea,
+      balanceBad: balanceBad.length,
+      tinyBasins: lks.filter((l) => l.basinArea <= 2).length,
+      riverCellsInLake, riverTotal,
+      wetTotal: lakeAreas.reduce((a, b) => a + b, 0),
     },
     depthHist: { bins, counts: depthHist },
     invariants: {
@@ -397,8 +439,23 @@ const checks = [
   ['定理 每个陆地格都能走到海洋',        I.unreachedLand === 0, `走不到 ${I.unreachedLand} 格`],
   ['定理 水量守恒（相对误差 < 1e-6）',   parseFloat(I.conservationRel) < 1e-6,
     `产流 ${I.runoffSum} vs 终点 ${I.sinkSum}（相对误差 ${I.conservationRel}）`],
-  ['湖泊已产出（H2 不做水量平衡）',      S.lakes.count > 0 && S.lakes.endorheicNull,
-    `${S.lakes.count} 个湖｜最大 ${S.lakes.largest} 格｜占陆地 ${S.lakes.pctOfLand}%｜isEndorheic 全为 null（H4 判定）`],
+  ['M17 湖泊数 ≥ 15（★ 口径已改写，理由见文件头）', S.lakes.count >= 15,
+    `${S.lakes.count} 个（洼地 ≥ ${env.hydro.minLakeArea} 格）· 最大湖 ${S.lakes.largest} 格 · ` +
+    `湖面共 ${S.lakes.totalCells} 格（占陆地 ${S.lakes.pctOfLand}%）· 小水洼（洼地 ≤2 格）${S.lakes.tinyBasins} 个`],
+  ['M17b 最大湖 ≥ 15 格', S.lakes.largest >= 15,
+    `${S.lakes.largest} 格（最大洼地 ${S.lakes.largestBasin} 格）· 前 5 ${S.lakes.top5.join('/')}`],
+  ['M18 内流盆地数 ∈ [5,25]', S.lakes.endorheic >= 5 && S.lakes.endorheic <= 25,
+    `${S.lakes.endorheic} 个（占湖 ${S.lakes.endorheicPct}%，其中干底 ${S.lakes.endorheicDry} 个）` +
+    `｜potentialEvaporation = ${env.hydro.potentialEvaporation}`],
+  ['P1-1 湖泊只出现在陆地洼地（水位 ≥ 海平面）',
+    S.lakes.levelBelowSea === 0 && S.lakes.belowSea === 0,
+    `水位低于海平面的湖 ${S.lakes.levelBelowSea} 个 · 湖面格低于海平面的 ${S.lakes.belowSea} 个`],
+  ['H4 水量平衡自洽（外流顶到溢出点 / 内流无出水）', S.lakes.balanceBad === 0,
+    `不自洽的湖 ${S.lakes.balanceBad} 个 · 分档 浅 ${S.lakes.tiers.shallow} / 深 ${S.lakes.tiers.deep} / 盐 ${S.lakes.tiers.salt}`],
+  ['M38 河线在湖边断开（构造保证：河面格不画线）',
+    RV && RV.lakeBreaks > 0 && RV.lineCells === S.lakes.riverTotal - S.lakes.riverCellsInLake,
+    RV ? `${S.lakes.riverTotal} 河格 − ${S.lakes.riverCellsInLake} 湖面河格 = ${RV.lineCells} 个画线格` +
+      ` · ${RV.lakeBreaks} 条链收口在湖岸` : '未取到'],
   ['页面自测（runSelfTest）全部通过',    S.selfTest && S.selfTest.failed.length === 0 && S.selfTest.checks >= 25,
     S.selfTest ? `${S.selfTest.checks} 条${S.selfTest.failed.length ? '，失败：' + S.selfTest.failed.join('、') : '，无失败项'}` : '未取到'],
 
@@ -411,7 +468,8 @@ const checks = [
   ['M32 河宽沿主下游不明显收腰（最大回缩 ≤ 25%）', RV && RV.maxWidthDipRel <= 0.25,
     RV ? `${RV.widthDips} 处回缩（占河格 ${(RV.widthDips / Math.max(1, R.V) * 100).toFixed(1)}%）｜最大幅度 ${(100 * RV.maxWidthDipRel).toFixed(1)}%` : '未取到'],
   ['M33 入海率 ≥ 70%', R.reachMouthPct >= 70,
-    `${R.reachMouthPct}%（H3 还没有内流盆地，H4 起这个数才有信息量）`],
+    `${R.reachMouthPct}%（★ H4 已判定出内流盆地，但河网仍是 DEM 的填平面 —— ` +
+    `内流湖那条"幽灵出湖河"还没掐掉，所以仍是 100%；把内流湖当**汇**重算 accum 之后这个数才会 <100%）`],
   ['M35 河网不像六边形折线（格网指纹 ≤ 40%）', RV && RV.gridFingerprintPct <= 40,
     RV ? `平滑后 ${RV.gridFingerprintPct}% ｜ 只有抖动、未平滑时 ${RV.gridFingerprintRawPct}%（直行段占 ${RV.gridStraightPct}%，已剔除）` : '未取到'],
   ['M37 河宽与汇水面积单调相关（Spearman ≥ 0.9）', RV && RV.spearman >= 0.9,
@@ -430,8 +488,10 @@ console.log(`对照（v1 台账口径 = 河格的二维邻接图，已证明与 
   `环 ${R.cellCycles} · 连通分量 ${R.cellComps} · 最大分量 ${R.cellLargest} 格`);
 console.log(`★ H3 风险诊断「河格是线还是片」：平均度 ${R.cellDegAvg}（树应 ≈2）· ` +
   `度≥3 占 ${R.cellDeg3Pct}% · 度分布 [0..6]=${R.degHist.join('/')}`);
-console.log(`湖泊：${S.lakes.count} 个（最大 ${S.lakes.largest} 格，前 5 ${S.lakes.top5.join('/')}）· ` +
+console.log(`湖泊（★ H4）：${S.lakes.count} 个（最大 ${S.lakes.largest} 格，前 5 ${S.lakes.top5.join('/')}）· ` +
   `湖面共 ${S.lakes.totalCells} 格（占陆地 ${S.lakes.pctOfLand}%）· 最深 ${S.lakes.maxDepth}`);
+console.log(`内流盆地：${S.lakes.endorheic} 个（占湖 ${S.lakes.endorheicPct}%，其中干底 ${S.lakes.endorheicDry} 个）· ` +
+  `分档 浅 ${S.lakes.tiers.shallow} / 深 ${S.lakes.tiers.deep} / 盐 ${S.lakes.tiers.salt}`);
 console.log(`depth 直方图（> 阈值的格数）：${S.depthHist.bins.map((b, i) => `${b}=${S.depthHist.counts[i]}`).join(' · ')}`);
 console.log(`河网几何体（★ H3）：${RV
   ? `${RV.triCount} 三角形 / ${RV.vertexCount} 顶点 / ${RV.chains} 条链 · 格间距 ${RV.spacing} · ` +

@@ -1,13 +1,15 @@
 /**
- * H3 截图：河网渲染层（三角带）。
+ * H3/H4 截图：河网渲染层（三角带）+ 湖泊 / 内流盆地（顶点色覆盖层）。
  *
- * 五组图：
- *   ① 全球 4 视角（群系 + 河网叠在上面）—— 整体观感
+ * 七组图：
+ *   ① 全球 4 视角（群系 + 河网 + 湖面叠在上面）—— 整体观感
  *   ② 「只留河线」2 视角（全部图块刷成背景色）—— 一眼判断是不是**树枝状水系**
  *   ③ 聚焦：转到「汇水面积最大的那一格」（主干）并推近，-full / -only 各一张
  *      —— 看"河是穿过格子的线，不是填满格子的色块"
  *   ④ 宽度-流量散点图（页内 canvas 画，不依赖 WebGL）
  *   ⑤ climateCoupling = 0 的对照图（全河等宽）—— 证明"粗细确实受降雨量影响"
+ *   ⑥ 阈值对照（T=12/20/30）
+ *   ⑦ ★ H4：湖泊清单图（页内 canvas）+ 只留湖面 + 最大湖/最大内流盆地近景 + 湖泊层开关对照
  *
  * 用法：node tools/shot-river.mjs
  * 输出：docs/river-shots/*.png、tools/out/shot-river.json（后者不入库）
@@ -64,12 +66,22 @@ const evaluate = async (expr) => {
 
 await send('Runtime.enable'); await send('Page.enable');
 await send('Page.navigate', { url: PAGE });
-for (let i = 0; i < 180; i++) { await sleep(1000); if (await evaluate('!!(window.__PLANET__ && window.__PLANET__.tiles)')) break; }
+let ready = false;
+for (let i = 0; i < 180; i++) {
+  await sleep(1000);
+  try { if (await evaluate('!!(window.__PLANET__ && window.__PLANET__.tiles)')) { ready = true; break; } } catch { /* 瞬时异常继续等 */ }
+}
+if (!ready) throw new Error('页面 180 秒未就绪（先关掉残留的 headless Chrome）');
 await sleep(2000);
+// ★ 就绪后再确认一次：页面崩溃 / 被重新导航会让 __PLANET__ 又消失，
+//   那时 env 求值会抛一个非常迷惑的 "Cannot read properties of undefined (reading 'CONFIG')"
+const afterReady = await evaluate('({ hasP: !!window.__PLANET__, href: String(location.href).slice(-40) })');
+if (!afterReady.hasP) throw new Error(`页面就绪 2 秒后 __PLANET__ 消失（href=${afterReady.href}）`);
 
 const env = await evaluate(`(() => {
-  const P = window.__PLANET__, C = P.CONFIG;
+  const P = window.__PLANET__;
   if (!P) return { ok: false, why: '没有 __PLANET__' };
+  const C = P.CONFIG;
   if (C.riverWidth !== undefined) return { ok: false, why: 'CONFIG.riverWidth 仍在：页面是 H1 之前的版本' };
   if (!C.hydro || C.hydro.riverWidthScale === undefined) return { ok: false, why: 'CONFIG.hydro 里没有 H3 渲染参数' };
   if (!P.river || !P.riverMesh) return { ok: false, why: '__PLANET__.river / riverMesh 缺失：河网渲染层还没落地' };
@@ -78,6 +90,22 @@ const env = await evaluate(`(() => {
 })()`);
 if (!env.ok) throw new Error(`页面状态不对：${env.why}（先关掉残留的 headless Chrome）`);
 console.log(`页面就绪：level=${env.level}，图块 ${env.tiles} 个`);
+
+/* ★★ 耗时必须在**零截图会话**里量。headless SwiftShader 的 Page.captureScreenshot
+   会把渲染器主线程拖慢：实测同一台机器、同一个页面，refresh() 正常 105–201 ms，
+   但在截图会话里会偶发 6–35 秒（H3 提交同样中招，纯计算对照仍稳定 → 与水文代码无关）。
+   所以耗时读数放在**第一张截图之前**，截图会话之后再量一次仅作对照。 */
+const cleanTiming = await evaluate(`(() => {
+  const P = window.__PLANET__, out = [];
+  for (let k = 0; k < 5; k++) {
+    const t0 = performance.now(); P.refresh(); const t1 = performance.now();
+    out.push({ all: +(t1 - t0).toFixed(1), hydro: P.hydro().ms, river: P.river().ms });
+  }
+  return out;
+})()`);
+const range = (arr) => `${Math.min(...arr)}–${Math.max(...arr)} ms`;
+console.log(`耗时（零截图会话 · 5 次 refresh）：整条 ${range(cleanTiming.map((r) => r.all))}｜` +
+  `水文 ${range(cleanTiming.map((r) => r.hydro))}｜河网重建 ${range(cleanTiming.map((r) => r.river))}`);
 
 fs.mkdirSync(OUT, { recursive: true });
 const shots = {};
@@ -265,6 +293,151 @@ await evaluate(`(() => { const P = window.__PLANET__; P.CONFIG.hydro.riverCellTh
 await allBiomes();
 await sleep(1200);
 
+/* ---------- ⑦ 湖泊与内流盆地（★ H4）----------
+ * 四件证据：
+ *   · lake-inventory.png —— 页内 canvas 出的**湖泊清单图**（等距圆柱投影 + 按湿面积排序的表）
+ *   · lake-only.png      —— 只留湖面格（湖面是**顶点色覆盖**，0 draw call）
+ *   · lake-close / lake-salt-close —— 最大湖 / 最大内流盆地的近景
+ *   · lake-off.png       —— 用 setVisibleOverlays 关掉湖泊层后的同一视角（证明开关真的生效） */
+await setRotation(0);
+await allBiomes();
+await sleep(800);
+
+const inv = await evaluate(`(() => {
+  const P = window.__PLANET__, hy = P.hydro(), C = P.CONFIG, tiles = P.tiles;
+  const TIER = { shallow: '#4f93c9', deep: '#26619c', salt: '#74a8a0' };
+  const W = 1180, H = 720;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#0b1220'; g.fillRect(0, 0, W, H);
+
+  /* --- 左：等距圆柱投影（只画陆地格 + 湖面格） --- */
+  const MW = 660, MH = 300, MX = 30, MY = 76;
+  g.fillStyle = '#101a2b'; g.fillRect(MX, MY, MW, MH);
+  const X = (t) => MX + (Math.atan2(t.center.x, t.center.z) / (2 * Math.PI) + 0.5) * MW;
+  const Y = (t) => MY + (0.5 - Math.asin(Math.max(-1, Math.min(1, t.center.y))) / Math.PI) * MH;
+  g.fillStyle = '#1d2c42';
+  for (const t of tiles) {
+    if (t.elevation <= C.seaLevel) continue;
+    g.fillRect(X(t) - 1.5, Y(t) - 1.5, 3, 3);
+  }
+  for (let i = 0; i < tiles.length; i++) {
+    const lid = hy.lakeId[i];
+    if (lid < 0) continue;
+    const l = hy.lakes[lid], t = tiles[i];
+    g.fillStyle = TIER[l.tier];
+    g.fillRect(X(t) - 2.6, Y(t) - 2.6, 5.2, 5.2);
+    if (l.isEndorheic) {          // 内流盆地加黄框：一眼看出"干湿分异"的位置
+      g.strokeStyle = '#ffd45e'; g.lineWidth = 1;
+      g.strokeRect(X(t) - 2.6, Y(t) - 2.6, 5.2, 5.2);
+    }
+  }
+  g.fillStyle = '#cfe2ee'; g.font = 'bold 17px sans-serif'; g.textAlign = 'left';
+  g.fillText('湖泊清单图（等距圆柱投影）· 黄框 = 内流盆地', MX, 30);
+  g.fillStyle = '#5b7089'; g.font = '14px sans-serif';
+  g.fillText('灰点 = 陆地格（海拔 > 海平面）· 色块 = 湖面格（按水位分档）', MX, 54);
+  g.fillStyle = TIER.shallow; g.fillText('■ 浅湖', MX, MY + MH + 24);
+  g.fillStyle = TIER.deep;    g.fillText('■ 深湖', MX + 70, MY + MH + 24);
+  g.fillStyle = TIER.salt;    g.fillText('■ 内流湖 / 盐碱滩', MX + 140, MY + MH + 24);
+
+  /* --- 右：按湿面积排序的表（标注内流/外流） --- */
+  const rows = hy.lakes.slice().sort((a, b) => b.wetArea - a.wetArea);
+  const TX = MX + MW + 26, TY = 76, RH = 30;
+  g.fillStyle = '#cfe2ee'; g.font = 'bold 15px sans-serif';
+  g.fillText('湖', TX, TY - 30); g.fillText('湿/洼', TX + 34, TY - 30);
+  g.fillText('档位', TX + 96, TY - 30); g.fillText('水位', TX + 168, TY - 30);
+  g.fillText('深', TX + 232, TY - 30); g.fillText('入流/蒸发', TX + 276, TY - 30);
+  g.font = '14px sans-serif';
+  for (let k = 0; k < Math.min(rows.length, 19); k++) {
+    const l = rows[k], y = TY + k * RH;
+    g.fillStyle = '#8aa2bb'; g.fillText('#' + l.id, TX, y);
+    g.fillStyle = '#e6eef7'; g.fillText(l.wetArea + '/' + l.basinArea, TX + 34, y);
+    g.fillStyle = TIER[l.tier]; g.fillText(l.tier === 'salt' ? '盐湖' : (l.tier === 'shallow' ? '浅湖' : '深湖'), TX + 96, y);
+    g.fillStyle = '#e6eef7'; g.fillText(l.level.toFixed(3), TX + 168, y);
+    g.fillText(l.depthMean.toFixed(4), TX + 232, y);
+    g.fillStyle = l.isEndorheic ? '#ffd45e' : '#8aa2bb';
+    g.fillText(l.inflow.toFixed(1) + '/' + l.evap.toFixed(1) + (l.isEndorheic ? ' 内流' : ' 外流'), TX + 276, y);
+  }
+  g.fillStyle = '#5b7089'; g.font = '13px sans-serif';
+  g.fillText('入流/蒸发同一量纲（1 ≈ 陆地平均产流）；内流湖的蒸发追平了入流，所以水位停在溢出点以下',
+    MX, H - 16);
+  return {
+    dataUrl: cv.toDataURL('image/png'),
+    count: hy.lakes.length,
+    endorheic: hy.lakes.filter((l) => l.isEndorheic).length,
+    top: rows.slice(0, 8).map((l) => ({ id: l.id, wet: l.wetArea, basin: l.basinArea, tier: l.tier,
+      endorheic: l.isEndorheic, level: +l.level.toFixed(4), depth: +l.depthMean.toFixed(4),
+      inflow: +l.inflow.toFixed(2), evap: +l.evap.toFixed(2) })),
+  };
+})()`);
+fs.writeFileSync(path.join(OUT, 'lake-inventory.png'), Buffer.from(inv.dataUrl.split(',')[1], 'base64'));
+console.log(`     · lake-inventory.png（${inv.count} 个湖，内流 ${inv.endorheic} 个）`);
+
+/* 只留湖面格（顶点色覆盖 —— 河网那种独立几何体是刷不掉的，湖面能刷掉就说明它走的是顶点色） */
+const onlyLakes = () => evaluate(`window.__PLANET__.setVisibleBiomes(['__lake__'])`);
+await onlyLakes();
+await sleep(1200);
+shots.lakeOnly = await snap('lake-only-a000', true);
+await allBiomes();
+console.log('√ 只留湖面 a=0°');
+
+/* 最大湖 / 最大内流盆地的近景 */
+const pick = await evaluate(`(() => {
+  const P = window.__PLANET__, hy = P.hydro();
+  const deepestCell = (l) => {
+    let c = -1;
+    for (let i = 0; i < P.tiles.length; i++) {
+      if (hy.lakeId[i] !== l.id) continue;
+      if (c < 0 || P.tiles[i].elevation < P.tiles[c].elevation) c = i;
+    }
+    return c;
+  };
+  const byWet = hy.lakes.slice().sort((a, b) => b.wetArea - a.wetArea)[0];
+  const salts = hy.lakes.filter((l) => l.isEndorheic).sort((a, b) => b.basinArea - a.basinArea);
+  const salt = salts[0] || null;
+  return {
+    lake: { id: byWet.id, cell: deepestCell(byWet), wet: byWet.wetArea, tier: byWet.tier,
+      endorheic: byWet.isEndorheic, biome: P.tiles[deepestCell(byWet)].biome },
+    salt: salt ? { id: salt.id, cell: deepestCell(salt), basin: salt.basinArea, wet: salt.wetArea,
+      biome: P.tiles[deepestCell(salt)].biome } : null,
+  };
+})()`);
+
+/* 推近一档：滚轮 deltaY = -400 约一档，累积若干次 */
+async function zoomIn(times) {
+  for (let k = 0; k < times; k++) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 640, y: 400, deltaX: 0, deltaY: -400, button: 'none', modifiers: 0 });
+    await sleep(250);
+  }
+}
+async function nearShot(tag, cell, times = 3) {
+  await focusOn(cell);
+  await evaluate(`window.__PLANET__.setHovered(-1)`);     // 去掉悬停提亮，免得把湖色盖掉
+  await resetZoom();
+  await zoomIn(times);
+  await sleep(1300);
+  const r = await snap(tag);
+  return r;
+}
+
+/* 最大湖近景，然后**同一机位**关掉湖泊层再拍 —— 这一对才是"开关真的生效"的证据。
+   最后再恢复一次、同机位拍第三张，证明开关是**可逆**的（顶点色覆盖层的常见坑：一关就回不来）。 */
+shots.lakeClose = await nearShot('lake-close', pick.lake.cell);
+await evaluate(`window.__PLANET__.setVisibleOverlays(['river','ore'])`);
+await sleep(1200);
+shots.lakeCloseOff = await snap('lake-close-off');
+await evaluate(`window.__PLANET__.setVisibleOverlays(null)`);
+await sleep(1200);
+shots.lakeCloseOn = await snap('lake-close-on');
+console.log(`√ 近景：最大湖 #${pick.lake.id}（湿 ${pick.lake.wet} 格 / ${pick.lake.tier}）` +
+  `｜同机位 on/off/on 三张（lake-close / -off / -on）`);
+
+if (pick.salt) {
+  await nearShot('lake-salt-close', pick.salt.cell);
+  console.log(`√ 近景：最大内流盆地 #${pick.salt.id}（洼地 ${pick.salt.basin} 格 / 湿 ${pick.salt.wet} 格）`);
+}
+await resetZoom();
+
 /* ---------- 汇总 ---------- */
 const stats = await evaluate(`(() => {
   const P = window.__PLANET__, hy = P.hydro(), rs = P.river();
@@ -280,6 +453,27 @@ const stats = await evaluate(`(() => {
     drawCalls: info.drawCalls, meshCount: info.meshCount, triangles: info.triangles,
     fps: info.fps,
     buildTimings: P.buildTimings,
+    /* ★ 这里是"截图会话跑完之后"再量一次 —— 只作对照，**报告里不用这个数**：
+       截图会话会把主线程拖慢（见文件上方 cleanTiming 的说明）。 */
+    lateTiming: (() => {
+      const t0 = performance.now();
+      P.refresh();
+      const t1 = performance.now();
+      return { refreshMs: +(t1 - t0).toFixed(1), riverMs: P.river().ms, hydroMs: P.hydro().ms };
+    })(),
+    lakes: {
+      count: hy.lakes.length,
+      endorheic: hy.lakes.filter((l) => l.isEndorheic).length,
+      endorheicDry: hy.lakes.filter((l) => l.isEndorheic && l.wetArea === 0).length,
+      tiers: { shallow: hy.lakes.filter((l) => l.tier === 'shallow').length,
+        deep: hy.lakes.filter((l) => l.tier === 'deep').length,
+        salt: hy.lakes.filter((l) => l.tier === 'salt').length },
+      largestWet: Math.max(0, ...hy.lakes.map((l) => l.wetArea)),
+      lakeCells: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) if (hy.lakeId[i] >= 0) c++; return c; })(),
+      riverCellsInLake: (() => { let c = 0; for (let i = 0; i < P.tiles.length; i++) if (hy.lakeId[i] >= 0 && hy.isRiver[i]) c++; return c; })(),
+      lakeBreaks: rs.lakeBreaks, lineCells: rs.lineCells,
+      overlays: P.overlays(),
+    },
     selfTest: selfTest ? {
       total: selfTest.rows.length,
       passed: selfTest.rows.filter((r) => r.ok).length,
@@ -290,7 +484,16 @@ const stats = await evaluate(`(() => {
 console.log('');
 console.log(`河网几何体：${stats.river.triCount} 三角形 / ${stats.river.vertexCount} 顶点 / ${stats.river.chains} 条链` +
   `（建模 ${stats.river.buildMs} ms，格间距 ${stats.river.spacing}）`);
+console.log(`refresh() 实测（★ 零截图会话，报告用这个）：整条 ${range(cleanTiming.map((r) => r.all))}` +
+  `（水文 ${range(cleanTiming.map((r) => r.hydro))} + 河网重建 ${range(cleanTiming.map((r) => r.river))}）`);
+console.log(`  对照 · 截图会话之后同一次 refresh：${stats.lateTiming.refreshMs} ms` +
+  `（水文 ${stats.lateTiming.hydroMs} + 河网 ${stats.lateTiming.riverMs}）—— 只说明截图会话会拖慢主线程`);
 console.log(`draw call = ${stats.drawCalls}｜Mesh ${stats.meshCount} 个｜三角形 ${stats.triangles}`);
+console.log(`湖泊（★ H4）：${stats.lakes.count} 个（最大湿面积 ${stats.lakes.largestWet} 格）· ` +
+  `内流 ${stats.lakes.endorheic} 个（干底 ${stats.lakes.endorheicDry}）· ` +
+  `分档 浅 ${stats.lakes.tiers.shallow}/深 ${stats.lakes.tiers.deep}/盐 ${stats.lakes.tiers.salt} · ` +
+  `湖面格 ${stats.lakes.lakeCells}（其中河格 ${stats.lakes.riverCellsInLake}）· ` +
+  `画线格 ${stats.lakes.lineCells} · ${stats.lakes.lakeBreaks} 条链收口在湖岸`);
 console.log(`生成耗时：${JSON.stringify(stats.buildTimings)}`);
 console.log(`页面自测：${stats.selfTest ? `${stats.selfTest.passed}/${stats.selfTest.total} 通过` : '（无 selfTest）'}`);
 if (stats.selfTest && stats.selfTest.failed.length) {
@@ -300,7 +503,7 @@ if (stats.drawCalls > 3) console.log(`⚠ draw call ${stats.drawCalls} > 3：河
 
 const out = path.join(ROOT, 'tools', 'out', 'shot-river.json');
 fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, JSON.stringify({ page: 'index.html', trunk: info, near, thresholds, shots, stats }, null, 2));
+fs.writeFileSync(out, JSON.stringify({ page: 'index.html', trunk: info, near, thresholds, inventory: inv.top, shots, stats }, null, 2));
 console.log(`\n截图 → ${path.relative(ROOT, OUT)}\\*.png`);
 
 ws.close(); child.kill(); await sleep(400);

@@ -154,7 +154,9 @@ await evaluate(`window.__HY__ = (() => {
       const dry = tiles.filter((t) => t.biome === 'desert');
       const dens = (arr) => (arr.length ? arr.filter((t) => isR[t.index]).length / arr.length : 0);
 
-      const lakeAreas = hy.lakes.map((l) => l.area).sort((a, b) => b - a);
+      // ★ H4：湖的"面积"现在有两个口径 —— wetArea（水位以下的湿格）与 basinArea（整个洼地）。
+      //   扫参时看 wetArea（真正的"湖"），内流盆地数另记一列。
+      const lakeAreas = hy.lakes.map((l) => l.wetArea).sort((a, b) => b - a);
 
       return {
         V, E: cE,
@@ -174,6 +176,7 @@ await evaluate(`window.__HY__ = (() => {
         accumMedianEq: +q(0.5).toFixed(1), accumMaxEq: +q(1).toFixed(1),
         wetDry: +(dens(wet) / Math.max(1e-9, dens(dry))).toFixed(1),
         lakes: hy.lakes.length, lakeLargest: lakeAreas[0] || 0,
+        endorheic: hy.lakes.filter((l) => l.isEndorheic).length,
         ms: hy.ms,
       };
     },

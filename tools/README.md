@@ -29,13 +29,14 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
 | `lab-orogeny.mjs` | **造山带调参实验室**（阶段 D）：扫 `bands / width / mtn / gain / minLen / maxLen / peak* / tempSnow / elevationSpread`，输出山脉占比（M6）、**带形长宽比**（最小外接矩形，面积加权 + 最大分量）、长条覆盖面积占比、赤道雪峰数、红线回归，并自动跑一遍 **v1 口径对照** | `node tools/lab-orogeny.mjs`<br>`node tools/lab-orogeny.mjs --bands=4,5,6 --width=5,6 --mtn=0.35` |
 | `shot-orogeny.mjs` | **阶段 D 截图**：全球 6 视角 + 「只显示山脉/雪峰」4 视角 + 2 个聚焦近景（`docs/orogeny-shots/` 的来源）。内置"背景色格数"探针，防止群系筛选没关掉就截图 | `node tools/shot-orogeny.mjs` |
 | `lab-climate.mjs` | **调参实验室**：加载一次页面，在页面内扫 `CONFIG` 组合，输出对比表 | `node tools/lab-climate.mjs` |
-| `verify-hydro.mjs` | **H2 + H3 验收**：22 条断言（河网拓扑 / 两条 P0-2 附加条 / **六条算法定理** / 湖泊 / **H3 河网几何体 + M31/M32/M33/M34/M35/M37** / 页面自测），文件头写了 M12–M16 与 M32/M35 的**口径改写与冲突证明** | `node tools/verify-hydro.mjs` |
-| `lab-hydro.mjs` | **水文扫参实验室**：一次加载内扫 `riverCellThreshold × flowExponent × runoffExponent`（默认 54 组），输出**两套图论口径**（流图 / 格邻接）+ 密度/汇水/海拔/度分布表，写 `tools/out/lab-hydro.json` | `node tools/lab-hydro.mjs`<br>`$env:HY_T='3,5,8,12'; node tools/lab-hydro.mjs` |
+| `verify-hydro.mjs` | **H2 + H3 + H4 验收**：27 条断言（河网拓扑 / 两条 P0-2 附加条 / **六条算法定理** / **H4 湖泊 M17·M17b·M18·M38 + 水量平衡 + 湖面高程** / H3 河网几何体 + M31–M37 / 页面自测），文件头写了 **M12–M16、M32/M35、M17** 三次**口径改写与冲突证明** | `node tools/verify-hydro.mjs` |
+| `lab-hydro.mjs` | **河网扫参实验室**：一次加载内扫 `riverCellThreshold × flowExponent × runoffExponent`（默认 54 组），输出**两套图论口径**（流图 / 格邻接）+ 密度/汇水/海拔/度分布表（含湖数/内流数），写 `tools/out/lab-hydro.json` | `node tools/lab-hydro.mjs`<br>`$env:HY_T='3,5,8,12'; node tools/lab-hydro.mjs` |
+| `lab-lake.mjs` | **★ H4 湖泊标定实验室**：一次加载内扫 `potentialEvaporation × minLakeArea × minLakeDepth`（默认 56 组），输出湖数 / 内流数 / **干底盆地数** / **小水洼数**（设计书 §10.1 的过水段污染度）/ 最大湖 / 分档 / **断湖链数**，写 `tools/out/lab-lake.json`。★ `potentialEvaporation` 是内流盆地数量的唯一旋钮，但它对 M18 是**弱识别**的（`PE ∈ [0.5,8]` 都能落进 5–25），所以真锚是**物理量级**（见 `docs/hydro-layer.md` §7.2） | `node tools/lab-lake.mjs`<br>`$env:LK_PE='1,2,4'; node tools/lab-lake.mjs` |
 | `lab-hydro-map.mjs` | **河网形状诊断**：把河网**正交投影**成一张 2D 图（灰绿=陆地 · 暗青=湖 · 亮蓝=河道，线宽 ∝ `accum^0.42`），直接看是"树枝"还是"糊片"。**不需要三维渲染，几秒出图** —— H2 唯一"看得见"的证据 | `node tools/lab-hydro-map.mjs`<br>`node tools/lab-hydro-map.mjs --t 20 --f 1.4` |
-| `shot-river.mjs` | **H3 河网渲染截图**（6 组）：全球 4 视角 / 「只留河线」2 视角 / 聚焦主干（远·近·近只留河线）/ **宽度-流量散点**（页内 canvas）/ `climateCoupling` 0-1 对照 / **阈值 T=12·20·30 同视角对照**（H2 头号风险的直接视觉证据） | `node tools/shot-river.mjs` |
+| `shot-river.mjs` | **H3 + H4 截图**（7 组）：全球 4 视角 / 「只留河线」2 视角 / 聚焦主干（远·近·近只留河线）/ **宽度-流量散点**（页内 canvas）/ `climateCoupling` 0-1 对照 / **阈值 T=12·20·30 同视角对照** / **★ H4 湖泊**（清单图 / 只留湖面 / 最大湖近景 / **开关同机位对照** / 盐湖近景） | `node tools/shot-river.mjs` |
 | `table-check.mjs` | markdown 表格列数自检（改完文档跑一遍） | `node tools/table-check.mjs docs/v1-biome-globe-review.md` |
 
-## ⚠️ 四个已经踩过的坑（新脚本请照抄防护）
+## ⚠️ 七个已经踩过的坑（新脚本请照抄防护）
 
 1. **残留的 Chrome 会静默污染结果**。`child.kill()` 在 Windows 上只杀启动器、不杀子进程，
    残留的浏览器会继续占着调试端口并**响应**请求 —— 新脚本可能连到"内存里跑着旧 `index.html`"
@@ -67,6 +68,15 @@ $env:CHROME_PATH = 'C:\path\to\chrome.exe'
    （与星球主体"从球外看逆时针"相反），会被 `FrontSide` **背面剔除**。
    要按 `(左i, 左i+1, 右i)` 排。诊断技巧：把 `material.side` 临时改成 `DoubleSide` 截图对比 ——
    若画面**逐像素一致**，说明不是剔除问题，别在这上面浪费时间。
+7. **★★ 耗时读数绝不能在截图会话里量**（H4 踩过，差点误判成"H4 引入了 20 秒卡顿"）：
+   headless + SwiftShader 下 `Page.captureScreenshot` 会把渲染器主线程拖慢，之后的
+   `refresh()` 会**偶发 6–35 秒**（实测 `performance.now()` 与 `Date.now()` 一致 → 是真停顿，
+   堆占用恒定 132 MB → 不是泄漏；**H3 提交同样中招** → 不是 H4 引入的）。
+   排查方法三步：① 换 `Date.now()` 交叉验证排除计时器跳变；② 在页面里跑一段与业务无关的
+   纯计算对照（`2e7` 次 `Math.sqrt`）—— 它仍稳定就说明不是 JS 引擎/机器的问题；
+   ③ **零截图会话**（一张图都不截，直接连测 30 次）—— 实测 **90–201 ms 全稳** → 根因是截图。
+   规矩：**耗时测量放在第一张截图之前**（`shot-river.mjs` 的 `cleanTiming` 就是这么做的），
+   截图之后再量的一次只当对照，报告不用它。
 
 ## 关键前提：`window.__PLANET__`
 
@@ -158,5 +168,5 @@ H3 起星球三角形仍是 245760，**河网是独立几何体**（18518 三角
 - `shot-terrain.mjs` → `docs/terrain-shots/candidates/`
 - `shot-orogeny.mjs` → `docs/orogeny-shots/`（全球 6 + 山地隔离 4 + 聚焦 6）
 - `lab-hydro-map.mjs` → `docs/hydro-shots/`（河网形状诊断 2D 图）
-- `shot-river.mjs` → `docs/river-shots/`（全球 4 + 只留河线 2 + 聚焦 3 + 宽度散点 1 + 气候耦合 2 + 阈值对照 3）
-- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` / `verify-hydro.mjs` / `lab-hydro.mjs` / `shot-river.mjs` → `tools/out/*.json`（`tools/out/` 不入库）
+- `shot-river.mjs` → `docs/river-shots/`（全球 4 + 只留河线 2 + 聚焦 3 + 宽度散点 1 + 气候耦合 2 + 阈值对照 3 + **H4 湖泊 6**）
+- `verify-render.mjs` / `lab-climate.mjs` / `lab-terrain.mjs` / `shot-terrain.mjs` / `lab-orogeny.mjs` / `shot-orogeny.mjs` / `verify-hydro.mjs` / `lab-hydro.mjs` / `lab-lake.mjs` / `shot-river.mjs` → `tools/out/*.json`（`tools/out/` 不入库）

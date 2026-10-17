@@ -119,6 +119,14 @@
 > 放矿 draw call 现在是 **3 → 5**（河网 +1、矿石 `InstancedMesh` +1）。
 > `render-l6-*.png` 这批图已按 H3 重新生成（画面里能看见河了）。
 
+> **★ H4 起（2026-10-17）：一行都没变，而且这次是"设计对了"的证据。**
+> 湖泊 / 内流盆地 / 盐湖是**面**，所以走**顶点色**（`docs/river-system-design.md` §3.2），
+> **不加层**：draw call 仍是 **3**、Mesh 仍是 **2**、`perTileSolidColor` 仍为真。
+> 唯一变的是渲染三角形 264278 → **260912** —— 河网几何体小了
+> （湖面格不画河线，M38：18518 → 15152 三角形）。
+> 想自己验"湖面真的走顶点色"：`setVisibleBiomes(['__lake__'])` 能把它刷掉，
+> 而河网（独立几何体）刷不掉 —— 见 `docs/river-shots/lake-only-a000.png`。
+
 > 顺带记录一个数据：`naiveFloorDiv6WrongTriangles = 245745 / 245760 = 99.994%` ——
 > 用 `Math.floor(faceIndex / 6)` 反推图块在 level 6 下**几乎全错**（12 个五边形只有 5 个三角形，
 > 会把这之后的偏移全部错位）。这正是必须显式维护 `triToTile` 的原因。

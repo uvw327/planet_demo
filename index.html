@@ -262,10 +262,9 @@ const CONFIG = {
   //
   // ★ H2：新模型是**重力驱动**的 —— 填平洼地 → 多流向(MFD) → 汇水累积 → 阈值提取，
   //   于是「河网」是从地形上长出来的，天然有流向、天然成树枝。
-  //   参数按「数据层 / 渲染层」分块：这里只放 H2 数据层真正用到的六个。
-  //   渲染层（riverWidth* / riverLift / nodeJitter / climateCoupling）在 H3 加；
-  //   内流判定（potentialEvaporation）与盐湖在 H4 加。
-  //   刻意不提前塞占位参数 —— 用不到的配置项就是负债。
+  //   参数按「数据层 / 渲染层」分块，并且**用到才加** —— 用不到的配置项就是负债：
+  //   H2 只加数据层的六个；H3 加渲染层的八个；H4 加 `potentialEvaporation`（数据层）
+  //   与 `lakeShallowDepth`（渲染层）。
   //   见 docs/river-system-design.md §4、§7。
   hydro: {
     runoffExponent: 1.5,     // 降水 → 产流的非线性指数：>1 拉开干湿差（湿处河密、干处河疏）
@@ -283,7 +282,30 @@ const CONFIG = {
     // 湖泊过滤：ε 填平在极平坦处会留下深度 ≈ 若干 ε 的"过水段"，它们不是湖。
     // 这两个阈值把"过水段"滤掉；H4 会按水量平衡再精调一次。
     minLakeDepth: 0.002,     // 低于此深度不算被淹（单位 = 海拔）
-    minLakeArea: 4,          // 小于此格数的被淹区不画成湖
+    // ★ H4：洼地格数下限 4 → 3。实测（tools/lab-lake.mjs，level 6 / seed 20261016）：
+    //   面积 ≥4 → 15 个湖；≥3 → 19 个；≥2 → 21 个（其中 2 个只有 2 格）；≥1 → 31 个
+    //   （其中 9 个洼地 ≤2 格 —— 正是设计稿 §10.1 说的"小水洼 = 河流过水段"）。
+    //   取 3：**一个 1–2 格的水洼都不留**，同时湖数最多。再往下就只是为了凑数字。
+    minLakeArea: 3,
+
+    // --- H4：湖面水量平衡（内流盆地 / 盐湖的唯一旋钮，见 docs/river-system-design.md §4.8）---
+    // ★ 为什么"填平"得不到内流盆地：Priority-Flood 把所有洼地都填到能流出去，
+    //   所以在拓扑上**每个湖都是外流湖**（§4.7 的坑）。真实的里海/咸海/大盐湖/塔里木
+    //   不是拓扑封闭，而是**蒸发 ≥ 补给**：水面一直升，直到"溢出"或"蒸发追平汇水"。
+    //   这个参数就是潜在蒸发的强度（单位与产流一致：1 ≈ 陆地平均产流）：
+    //   调大 → 内流盆地变多（M18 目标 5–25）；调小 → 全变外流湖。
+    //
+    // ★ 取 2.0 是**按物理量级标定的**，不是凑 M18（实测 M18 ∈ [5,25] 对 PE ∈ [0.5, 8] 都成立，
+    //   所以单看 M18 定不下来）：
+    //     最干最热的一格蒸发 = PE × 温度 × 干燥度 = 2.0 × 0.9 × 0.95 ≈ 1.7，
+    //     而陆地平均产流 unit ≈ 0.25 → 比值 ≈ 7 倍。
+    //     地球上沙漠的潜在蒸发（2000–3000 mm/a）对全球平均径流（≈300 mm/a）正是 **7–10 倍**。
+    //   实测结果：19 个湖里 9 个内流（其中 5 个干底）、最大的 5 个湖全部外流（淡水），
+    //   与"内流盆地是少数、且只出现在干旱区"一致。
+    potentialEvaporation: 2.0,
+    // 湖面颜色分档的阈值（渲染层，单位 = 海拔）：depthMean 低于它算"浅湖"，否则"深湖"。
+    // 实测 level 6 的湖深中位数 ≈ 0.0059，所以 0.006 正好切在中位附近。
+    lakeShallowDepth: 0.006,
 
     // --- H3 渲染层：三角带河网（见 docs/river-system-design.md §5）---
     // ★ 宽度与抖动的单位都是「格」（会乘上实测格间距才变成世界单位），
@@ -378,6 +400,37 @@ const BIOME_LABEL = {
   [BIOME.MOUNTAIN]:   '山脉',
   [BIOME.SNOW]:       '雪峰',
   [BIOME.ICE]:        '冰原',
+};
+
+/* -------------------------------------------------------------------------
+ * 湖面（★ H4）：L1 覆盖层 —— 面走顶点色，成本 0 draw call（设计稿 §3.2 / §5.7）
+ *
+ * 分三档（= 设计稿 §5.7 的"浅湖 / 深湖 / 盐湖"），判据都是**水量平衡**算出来的物理量：
+ *   盐湖   = 内流湖（蒸发追平汇水，水面到不了溢出点）→ 干旱区
+ *   深湖   = 外流湖且 depthMean ≥ lakeShallowDepth
+ *   浅湖   = 外流湖且 depthMean <  lakeShallowDepth
+ *
+ * ★ 两处口径说明（都是"两份文档说法不同"时的取舍，写在这里免得下次又纠结）：
+ *
+ * ① 为什么"内流"这一条就够，不再单独乘温度：设计稿 §4.8 写的是
+ *    `isEndorheic && depth 浅 && 温度高`。但 `potentialEvap` **已经**乘过温度、除过湿度，
+ *    所以"能变成内流湖"这件事本身就等价于"这里干热"—— 再判一次温度是重复计。
+ *
+ * ② 颜色：P1-1 的原文写"盐湖/内流湖**更深色**"，设计稿 §4.8 写的是
+ *    **"水面干了"的盐碱色**。取一个能同时满足两者的**灰青**：它比两个蓝都"更沉"（满足 P1-1），
+ *    又明显偏绿、像盐碱滩（满足 §4.8）。内流盆地里"有明水的盐湖"（里海型）与"干成盐碱滩的"
+ *    （塔里木型）在地球上是**同一种地貌的两个水位**，用同一个色也是诚实的。
+ * ------------------------------------------------------------------------- */
+const LAKE_TIER = { SHALLOW: 'shallow', DEEP: 'deep', SALT: 'salt' };
+const LAKE_COLOR = {
+  [LAKE_TIER.SHALLOW]: 0x4f93c9,   // 浅湖：偏亮的蓝
+  [LAKE_TIER.DEEP]:    0x26619c,   // 深湖：更深、更沉
+  [LAKE_TIER.SALT]:    0x74a8a0,   // 内流湖 / 盐碱滩：灰青（一眼区别于海洋与普通湖）
+};
+const LAKE_LABEL = {
+  [LAKE_TIER.SHALLOW]: '湖泊（浅）',
+  [LAKE_TIER.DEEP]:    '湖泊（深）',
+  [LAKE_TIER.SALT]:    '盐湖（内流）',
 };
 
 /**
@@ -1123,6 +1176,24 @@ function runoffAt(tile) {
 }
 
 /**
+ * 每格潜在蒸发（★ H4）：湖面水量平衡的另一半。
+ *
+ * `evap = potentialEvaporation × 温度 × 干燥度`，与 `runoffAt` **同一套量纲**
+ * （1 ≈ 陆地平均产流），所以 `inflow` 与 `evap` 可以直接比大小 —— 这是"内流盆地"
+ * 判定的全部依据（见 docs/river-system-design.md §4.8）。
+ *
+ * 物理直觉：干热最强（撒哈拉）、湿冷最弱（雨林/冰原）。于是
+ * "湖的补给 < 湖面蒸发"这件事**天然发生在干旱区** —— 这正是里海/咸海/大盐湖/塔里木的位置。
+ * ★ 注意：这里**不**再用 `runoffExponent` 的非线性（那是降水→产流的转换），
+ *   蒸发用线性干燥度即可；再叠一层幂只会让标定多一个自由度而没有物理依据。
+ */
+function potentialEvapAt(tile) {
+  return CONFIG.hydro.potentialEvaporation
+    * clamp01(tile.temperature)
+    * (1 - clamp01(tile.moisture));
+}
+
+/**
  * Priority-Flood + ε 填平：算出「把每个洼地填到能流出去」之后的水面高程 filled。
  *
  * 不填平会怎样：噪声地形有无数局部洼地，水往下走几步就掉进坑里 → 河网碎成几百段
@@ -1328,42 +1399,60 @@ function extractRivers(tiles, adj, filled, accum, unit, down) {
 }
 
 /**
- * 湖泊：`depth = filled − elevation > minLakeDepth` 的**连通分量**。
+ * 湖泊：`depth = filled − elevation > minLakeDepth` 的**连通分量** + **湖面水量平衡**（★ H4）。
  *
- * 每个分量 = 一个湖，附带面积 / 深浅 / 溢出点高程 / 入流。
+ * 两步：
  *
- * ★ H2 刻意**不做水面水量平衡**：Priority-Flood 会把所有洼地都填到"能流出去"，
- *   所以这一步得到的每个湖在拓扑上都是外流湖。真正的"内流盆地"不是拓扑封闭造成的，
- *   而是**蒸发 ≥ 补给**（里海、咸海、大盐湖、塔里木都是这样）——
- *   那是 H4 用 `potentialEvaporation` 解出来的，所以这里 `isEndorheic` 先留 `null`
- *   （"未判定"），而不是谎报 false。
+ * ① **连通分量**（H2 起）：每个洼地 = 一个候选湖，附带洼地面积 / 溢出点高程。
+ *    这是**地形尺度**的量，与气候无关。
  *
- * `minLakeArea` / `minLakeDepth` 的用处：ε 填平在极平坦处会留下深度 ≈ 若干 ε 的
- * "过水段"，它们不是湖。这两个阈值把"过水段"滤掉，H4 会再按水量平衡精调。
+ * ② **湖面水量平衡**（H4 新加，设计稿 §4.7 的坑 + §4.8 的正解）：
+ *    Priority-Flood 把所有洼地都填到"能流出去"，所以**光靠填平，每个湖在拓扑上都是外流湖**
+ *    （M18 会恒等于 0）。真实的里海 / 咸海 / 大盐湖 / 塔里木不是拓扑封闭，而是**蒸发 ≥ 补给**：
+ *    水面一直升，直到"溢出"或"蒸发追平汇水"。
+ *      · 顶到溢出点时的蒸发 ≤ 入流 → 水一直升到溢出点 → **外流湖**（多余的水从 outlet 流走）
+ *      · 否则 → 在某个中间水位蒸发就追平了入流 → 水面停住 → **内流湖（盐湖）**
+ *    判据里唯一的参数是 `potentialEvaporation`（见 `potentialEvapAt`）。
+ *
+ * 入流用 MFD 的**分流比例**精确累加（H2 只算了"主下游那一份"，这里补上设计稿 §4.7 说的精确化）。
+ *
+ * 输出：
+ *   · `lakeId[x] >= 0` = **要按湖色画的格子**（见下面"渲染范围"）；水位以上的干底不算水面。
+ *   · `lakes[i]` 带 `level` / `wetArea` / `basinArea` / `inflow` / `evap` / `outflow` /
+ *     `isEndorheic` / `tier`。
+ *
+ * ★ 渲染范围（为什么内流盆地画整个洼地）：外流湖的水面 = 水位以下的格子（水位以上是普通陆地，
+ *   一条河谷里的湖就是这个样子）；**内流盆地则是整个封闭洼地** —— 盐随水来、随蒸发留在盆底，
+ *   会铺满整个盆地（卫星图上的塔里木、大自流盆地、乌尤尼都是这样）。这样即使水位低到没有明水，
+ *   盆地也看得见，不会出现"判成内流盆地却什么都看不到"。
+ *
+ * ★ 一个刻意保留的**已知简化**：内流湖下游那条"幽灵河"。DEM 的填平面会翻过溢出点，所以
+ *   `down` 从内流湖出去仍然有路，河网里就还留着一条**没有水量**的出湖河。
+ *   要根治得把内流湖当**汇**重算 `accum` 与河网（`M33 入海率`才会真的 < 100%）——
+ *   那是独立的一步，见 docs/hydro-layer.md §7。
  */
-function findLakes(tiles, adj, filled, depth, accum, runoff, down) {
+function findLakes(tiles, adj, filled, depth, runoff, accum, w) {
   const n = tiles.length;
   const minArea = CONFIG.hydro.minLakeArea;
   const minDepth = CONFIG.hydro.minLakeDepth;
   const lakeId = new Int32Array(n).fill(-1);
   const seen = new Uint8Array(n);
   const lakes = [];
+  const membersOf = [];        // 每个湖的洼地成员（临时；不进 world.hydro —— 那是几万个数字）
   const stack = [];
   const members = [];
 
+  // ---- ① 连通分量：depth > minDepth 的格子连成片 ----
   for (let s = 0; s < n; s++) {
     if (seen[s] || depth[s] <= minDepth) continue;
     seen[s] = 1;
     stack.length = 0; stack.push(s);
     members.length = 0;
-    let spillLevel = filled[s], outlet = s, depthSum = 0, depthMax = 0;
+    let spillLevel = filled[s], outlet = s;
 
     while (stack.length > 0) {
       const x = stack.pop();
       members.push(x);
-      const d = depth[x];
-      depthSum += d;
-      if (d > depthMax) depthMax = d;
       if (filled[x] > spillLevel) { spillLevel = filled[x]; outlet = x; }
       for (const k of adj[x]) {
         if (!seen[k] && depth[k] > minDepth) { seen[k] = 1; stack.push(k); }
@@ -1373,32 +1462,87 @@ function findLakes(tiles, adj, filled, depth, accum, runoff, down) {
     if (members.length < minArea) continue;          // 太小：当"过水段"，不成湖
 
     const id = lakes.length;
-    for (const x of members) lakeId[x] = id;
+    membersOf.push(members.slice());
     lakes.push({
       id,
-      area: members.length,
-      depthMean: depthSum / members.length,
-      depthMax,
-      spillLevel,          // 溢出点高程：水位顶到这里就开始出水
-      outlet,              // 溢出点所在的格子（H4 的"出湖河"从这里出发）
-      level: spillLevel,   // H4 会用「湖面水量平衡」把它压到 spillLevel 以下（内流湖）
-      inflow: 0,           // 湖面降水 + 湖外入流，下面统一补算
-      outflow: null,       // H4：外流湖的出水 = inflow − 湖面蒸发
-      isEndorheic: null,   // H4：null = 未判定
+      basinArea: members.length,   // 洼地面积（地形尺度；水量平衡不会改它）
+      wetArea: 0,                  // 湿面积（水位以下的格数，下面重算）
+      depthMean: 0,                // 按**水位**算的深浅（不是按填平面）
+      depthMax: 0,
+      spillLevel,                  // 溢出点高程：水位顶到这里就开始出水
+      outlet,                      // 溢出点所在的格子（出湖河从这里出发）
+      level: spillLevel,           // 水位（外流湖 = spillLevel；内流湖 = 平衡水位）
+      inflow: 0,                   // 入流 = 湖面自身产流 + 从湖外流进来的全部汇水
+      evap: 0,                     // 水位处的湖面总蒸发
+      outflow: 0,                  // 外流湖 = inflow − evap；内流湖 = 0
+      isEndorheic: false,          // 内流 = 蒸发追平入流（盐湖）
+      tier: LAKE_TIER.SHALLOW,     // 渲染分档（LAKE_COLOR）
     });
   }
+  if (lakes.length === 0) return { lakeId, lakes };
 
-  // 入流 = 湖面自身产流 + 「主下游落在湖里、而自己不在湖里」的格子的全部汇水。
-  // （MFD 会把水按比例分给多个出口，这里只算主下游那一份 —— H4 做水量平衡时再精确化。）
-  const lakeInflow = new Float64Array(n);
-  for (let y = 0; y < n; y++) {
-    const d = down[y];
-    if (d >= 0 && lakeId[d] >= 0 && lakeId[y] !== lakeId[d]) lakeInflow[d] += accum[y];
+  // ---- ② 入流：湖面自身产流 + 从湖外流进湖里的**全部**汇水（按 MFD 分流比例）----
+  for (let x = 0; x < n; x++) {
+    const lx = lakeId[x];
+    for (let j = w.start[x]; j < w.start[x + 1]; j++) {
+      const ly = lakeId[w.target[j]];
+      if (ly >= 0 && ly !== lx) lakes[ly].inflow += accum[x] * w.prob[j];
+    }
   }
-  for (let i = 0; i < n; i++) {
-    const id = lakeId[i];
-    if (id < 0) continue;
-    lakes[id].inflow += runoff[i] + lakeInflow[i];
+  for (let i = 0; i < lakes.length; i++) {
+    for (const y of membersOf[i]) lakes[i].inflow += runoff[y];
+  }
+
+  // ---- ③ 湖面水量平衡：按地面高程从低到高逐格加水，直到"湖面蒸发 > 入流" ----
+  const sorted = [];
+  const wet = [];
+  for (let i = 0; i < lakes.length; i++) {
+    const lake = lakes[i];
+    const mem = membersOf[i];
+
+    sorted.length = 0;
+    for (const x of mem) sorted.push(x);
+    sorted.sort((a, b) => tiles[a].elevation - tiles[b].elevation);   // 同高程的一起淹
+
+    let cumEvap = 0, level = lake.spillLevel, endorheic = false;
+    for (let k = 0; k < sorted.length; k++) {
+      const ev = potentialEvapAt(tiles[sorted[k]]);
+      if (cumEvap + ev > lake.inflow) {
+        // 蒸发在淹到这一格之前就追平了入流 → 水面停在这一格的地面之下
+        level = tiles[sorted[k]].elevation;
+        endorheic = true;
+        break;
+      }
+      cumEvap += ev;
+      level = tiles[sorted[k]].elevation;
+    }
+    // 循环走完（没 break）= 蒸发到溢出点都没追平入流 → 外流湖，水位顶到溢出点
+    if (!endorheic) level = lake.spillLevel;
+
+    // 湿格 = **严格低于水位**的格子（水位本身那一格是岸边，不算被淹）
+    wet.length = 0;
+    let dSum = 0, dMax = 0;
+    for (const x of mem) {
+      const d = level - tiles[x].elevation;
+      if (d <= 0) continue;
+      wet.push(x);
+      dSum += d;
+      if (d > dMax) dMax = d;
+    }
+
+    lake.level = level;
+    lake.wetArea = wet.length;
+    lake.depthMean = wet.length > 0 ? dSum / wet.length : 0;
+    lake.depthMax = dMax;
+    lake.evap = cumEvap;
+    lake.isEndorheic = endorheic;
+    lake.outflow = endorheic ? 0 : lake.inflow - cumEvap;
+    lake.tier = endorheic ? LAKE_TIER.SALT
+      : (lake.depthMean < CONFIG.hydro.lakeShallowDepth ? LAKE_TIER.SHALLOW : LAKE_TIER.DEEP);
+
+    // 写渲染范围：外流湖 = 湿格；内流盆地 = 整个洼地（盐碱滩铺满盆底，见函数头注释）
+    const drawn = endorheic ? mem : wet;
+    for (const x of drawn) lakeId[x] = i;
   }
 
   return { lakeId, lakes };
@@ -1435,7 +1579,8 @@ function computeHydrology(tiles) {
 
   const { isRiver, isSource, isMouth, count: riverCount, pruned } =
     extractRivers(tiles, adj, filled, accum, unit, down);
-  const { lakeId, lakes } = findLakes(tiles, adj, filled, depth, accum, runoff, down);
+  // ★ H4：findLakes 现在还要做**湖面水量平衡**，所以需要 `w`（按 MFD 分流比例算入流）
+  const { lakeId, lakes } = findLakes(tiles, adj, filled, depth, runoff, accum, w);
 
   return {
     adj, filled, depth, runoff, accum,
@@ -1555,9 +1700,9 @@ function buildPlanetGeometry(tiles) {
     const cy = tile.center.y * avgR;
     const cz = tile.center.z * avgR;
 
-    // 群系本色（setHex 会按 three 的色彩管理把 sRGB 转到线性工作空间，
-    // 因此写进顶点色后与重构前 material.color 的观感完全一致）
-    col.setHex(BIOME_COLOR[tile.biome]);
+    // 地表本色（★ H4：改成读 `tile.baseColor`，让「湖面覆盖」只有一处派生点；
+    // 它已经在工作色彩空间里，所以用 copy 而不是再 setHex 一次，避免色彩空间来回转换）
+    col.copy(tile.baseColor);
     const cr = col.r, cg = col.g, cb = col.b;
 
     // 2.1 扇心顶点：法线即单位中心方向（center 本身已是单位向量）
@@ -1704,14 +1849,22 @@ function buildRiverGeometry(tiles, hy) {
     return m.addScaledVector(dir, slide).normalize().multiplyScalar(lift);
   };
 
-  /* --- 3. 链分解：河源/汇流点 → 下一个汇流点/河口 --- */
-  const upCount = new Int32Array(n);                  // 沿主下游流入本格的河格数
-  for (const x of riverCells) {
+  /* --- 3. 链分解：河源/汇流点 → 下一个汇流点/河口 ---
+     ★ H4（M38）：**湖面格不画河线** —— 河在湖边断开，出湖河从湖的下一格重新起笔。
+       判据只加在渲染层（`isLine`），数据层的 isRiver/accum/down 一个都不动：
+       数据层说"这里过水"，渲染层说"这里画不画"，两者本来就该解耦。
+       于是：入湖那条链在**陆湖共享边的中点**收口（= 湖岸线），
+       湖下游第一格因为上游不是"线格"而 upCount = 0 → 自然成为新链的起点。 */
+  const isLine = (x) => hy.isRiver[x] === 1 && hy.lakeId[x] < 0;
+  const lineCells = riverCells.filter(isLine);
+  const upCount = new Int32Array(n);                  // 沿主下游流入本格的**线格**数
+  for (const x of lineCells) {
     const d = hy.down[x];
-    if (d >= 0 && hy.isRiver[d]) upCount[d]++;
+    if (d >= 0 && isLine(d)) upCount[d]++;
   }
   const chains = [];
-  for (const x of riverCells) {
+  let lakeBreaks = 0;                                 // 有多少条链收口在湖岸（M38 的非空证据）
+  for (const x of lineCells) {
     if (upCount[x] === 1) continue;                   // 链中段：由上游那条链走下来
     const path = [x];
     let cur = x;
@@ -1719,7 +1872,11 @@ function buildRiverGeometry(tiles, hy) {
       const d = hy.down[cur];
       if (d < 0) break;                               // 终点（陆地格理论上不会发生）
       path.push(d);
-      if (!hy.isRiver[d] || upCount[d] >= 2) break;   // 入海 / 到达汇流点
+      if (!isLine(d)) {                               // 入海 / 入湖：止于边界中点
+        if (hy.isRiver[d]) lakeBreaks++;              // 收口在湖岸（海水格不算）
+        break;
+      }
+      if (upCount[d] >= 2) break;                     // 到达汇流点
       cur = d;
     }
     chains.push(path);
@@ -1731,14 +1888,14 @@ function buildRiverGeometry(tiles, hy) {
     const s = points.length;
     for (let i = 0; i < path.length; i++) {
       const x = path[i];
-      if (!hy.isRiver[x]) continue;                   // 海水格不生成点（河口止于边界中点）
+      if (!isLine(x)) continue;                       // 海水格 / 湖面格不生成点（河口止于边界中点）
       points.push(nodeOf(x));
       halfW.push(widths[x] * 0.5);
       const d = path[i + 1];
       if (d === undefined || d < 0) continue;
       points.push(edgeMid(x, d));
       // 节点处取相邻两段的最大值：避免下游突然变窄（设计稿 §5.3）
-      halfW.push((hy.isRiver[d] ? Math.max(widths[x], widths[d]) : widths[x]) * 0.5);
+      halfW.push((isLine(d) ? Math.max(widths[x], widths[d]) : widths[x]) * 0.5);
     }
     if (points.length - s >= 2) ranges.push([s, points.length]);
   }
@@ -1853,6 +2010,8 @@ function buildRiverGeometry(tiles, hy) {
     pointCountFinal: points.length,                    // 平滑后点数
     chainLenMax: maxChainLen,                          // 最长链的点数
     spacing, eqMedian,
+    lakeBreaks,                                        // ★ H4：收口在湖岸的链数（M38 的非空证据）
+    lineCells: lineCells.length,                       // ★ H4：真正画线的格子数（= 河格 − 湖面格）
     gridFingerprintPct: fp.pct,                        // 平滑后（眼睛看到的）
     gridFingerprintRawPct: fpRaw.pct,                  // 平滑前（只有节点抖动）
     gridStraightPct: fp.straightPct,                   // 直行段占比（口径说明用）
@@ -2080,7 +2239,13 @@ function updateHud(tile) {
     let text = `${eq.toFixed(1)} 格`;
     if (hy.isRiver[i]) text += hy.isSource[i] ? ' · 河源' : (hy.isMouth[i] ? ' · 河口' : ' · 河道');
     const lid = hy.lakeId[i];
-    if (lid >= 0) text += ` · 湖#${lid}(${hy.lakes[lid].area}格)`;
+    if (lid >= 0) {
+      // ★ H4：湿面积/洼地面积、渲染分档（浅湖/深湖/盐湖）与湖深。
+      //   `wetArea/basinArea` 不相等是正常的 —— 内流盆地的干底也是盆地（见 findLakes 注释）。
+      const lk = hy.lakes[lid];
+      text += ` · 湖#${lid}（${lk.wetArea}/${lk.basinArea}格 · ${LAKE_LABEL[lk.tier]}`
+        + ` · 深 ${lk.depthMean.toFixed(3)}）`;
+    }
     hudHydro.textContent = text;
   } else {
     hudHydro.textContent = '—';
@@ -2095,6 +2260,22 @@ function updateHud(tile) {
 /* -------------------------------------------------------------------------
  * 7.1  顶点色：高亮 / 选中
  * ------------------------------------------------------------------------- */
+
+/**
+ * 图块的「地表本色」= L0 气候群系，被 L1 湖面覆盖（★ H4）。
+ *
+ * 湖面是**面**，所以走顶点色，成本 **0 draw call**（设计稿 §3.2）。
+ * 判定顺序写在这**一个函数**里：L1 盖 L2（设计稿 §3.3）—— 不需要真的分两个 pass。
+ * `overlayVisible.lake` 关掉时湖面一起关掉，于是图例里"湖泊（面）"那一项是真的开关。
+ *
+ * ⚠️ 这是「本色」的唯一派生点。原来三处（建几何体 / setVisibleBiomes / refresh）各自
+ * `setHex(BIOME_COLOR[...])`，加一层覆盖物就得改三处、漏一处就出现"刷新后湖没了"。
+ */
+function applyTileBaseColor(tile) {
+  const id = overlayVisible.lake ? world.hydro.lakeId[tile.index] : -1;
+  if (id >= 0) tile.baseColor.setHex(LAKE_COLOR[world.hydro.lakes[id].tier]);
+  else tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
+}
 
 /** 一个图块「当前该显示的颜色」= 群系本色 + 悬停/选中的瞬时提亮（选中优先） */
 function computeTileColor(ti, out) {
@@ -2371,21 +2552,28 @@ function syncOreLayer() {
  *
  *   setVisibleOverlays(['river'])   → 只保留河网层
  *   setVisibleOverlays(['ore'])     → 只保留矿石符号层
+ *   setVisibleOverlays(['lake'])    → 只保留湖面（顶点色覆盖）
  *   setVisibleOverlays(null / [])   → 全部恢复
  *
  * 与 setVisibleBiomes 的差别：群系筛选靠改顶点色（0 成本），覆盖层各自按
- * 「面走顶点色 / 线走独立几何体」实现，所以这里只是把开关状态记下来，
- * 由各层自己去读（例如 syncOreLayer 读 overlayVisible.ore）。
+ * 「面走顶点色 / 线走独立几何体」实现：线层只是把开关状态记下来、由各层自己读
+ * （例如 syncOreLayer 读 overlayVisible.ore），而**面层（湖）**要在开关变化时
+ * 重新派生本色并重传顶点色 —— 但依旧 0 draw call。
  *
- * ★ H1 引入，H3 起 'river' 真实存在（'lake' 要等 H4）。
- *   'ore' / 'river' 都是真图层；'lake' 先记住状态，图层实现后立即生效 ——
- *   现在调用它不报错，也不会有任何视觉变化。
+ * ★ H1 引入；H3 起 'river' 真实存在；H4 起 'lake' 也真实存在（走顶点色）。
  */
 function setVisibleOverlays(list) {
   const keep = list && list.length ? new Set(list) : null;
+  const wasLake = overlayVisible.lake;
   for (const key of Object.keys(overlayVisible)) overlayVisible[key] = !keep || keep.has(key);
   if (gfx.oreLayer) gfx.oreLayer.visible = overlayVisible.ore && gfx.oreLayer.count > 0;
   if (gfx.riverLayer) gfx.riverLayer.visible = overlayVisible.river;
+  // ★ H4：湖面是**面** → 顶点色，开关它必须重新派生本色并重传顶点色（依旧 0 draw call）。
+  //   只在"这一项真的变了"时才刷，免得顺手把 setVisibleBiomes 的筛选结果冲掉。
+  if (world.hydro && wasLake !== overlayVisible.lake) {
+    for (const tile of tiles) applyTileBaseColor(tile);
+    repaintAll();
+  }
   return { ...overlayVisible };
 }
 
@@ -2490,8 +2678,15 @@ function buildLegend() {
     ],
     /* ★ H3：河流**不是群系**（H1 起升格为覆盖层），所以单独给一条图例。
        它画成"线"而不是"面"，用「（线）」标注形状差异。
-       H4 的湖泊 / 内流盆地 / 盐湖会接在这一组后面。 */
-    extra: [swatch(CONFIG.riverColor.toString(16).padStart(6, '0'), '河流（线）')] },
+       ★ H4：湖泊 / 盐湖也是覆盖层，但它们是**面** → 走顶点色（依旧 0 draw call），
+       所以颜色直接从 LAKE_COLOR 取。图例里"（面）/（线）"就是这个差别。 */
+    extra: [
+      swatch(CONFIG.riverColor.toString(16).padStart(6, '0'), '河流（线）'),
+      ...Object.keys(LAKE_TIER).map((k) => {
+        const t = LAKE_TIER[k];
+        return swatch(LAKE_COLOR[t].toString(16).padStart(6, '0'), `${LAKE_LABEL[t]}（面）`);
+      }),
+    ] },
   ];
   el.innerHTML = groups.map((g) => {
     const items = g.biomes
@@ -2788,6 +2983,69 @@ function runSelfTest(tiles) {
     }
   }
 
+  // ---- 湖泊与内流盆地（★ H4）----
+  // 数据层（水量平衡）与渲染层（顶点色分档）各自断言：前者多为**构造保证**，
+  // 后者是可核验的量（湖面格的颜色必须来自 LAKE_COLOR）。
+  if (world.hydro && world.hydro.lakes) {
+    const hyl = world.hydro;
+    const lks = hyl.lakes;
+    const endorheic = lks.filter((l) => l.isEndorheic);
+    const maxWet = lks.reduce((m, l) => Math.max(m, l.wetArea), 0);
+    check('H4 湖泊已产出（连通分量 + 湖面水量平衡）', lks.length >= 15
+      && lks.every((l) => typeof l.isEndorheic === 'boolean' && l.level <= l.spillLevel + 1e-12
+        && l.wetArea <= l.basinArea),
+      `${lks.length} 个湖（M17 口径：≥15 且无 ≤2 格水洼）· 最大湿面积 ${maxWet} 格 · 内流 ${endorheic.length} 个`);
+
+    const lakeCells = [];
+    for (let i = 0; i < tiles.length; i++) if (hyl.lakeId[i] >= 0) lakeCells.push(i);
+
+    // 湖只出现在陆地洼地：水位 ≥ 海平面（水域格 depth = 0，成不了湖的成员）
+    check('H4 湖面高程 ≥ 海平面（湖只出现在陆地洼地）',
+      lks.every((l) => l.level >= CONFIG.seaLevel)
+      && lakeCells.every((i) => tiles[i].elevation > CONFIG.seaLevel),
+      `${lakeCells.length} 个湖面格 · 最低水位 ${Math.min(...lks.map((l) => l.level)).toFixed(4)}`);
+
+    // 水量平衡自洽：外流湖水位顶到溢出点、内流湖没有出水；两者都满足"蒸发 ≤ 入流"
+    const badBalance = lks.filter((l) => l.evap > l.inflow * (1 + 1e-9)
+      || (l.isEndorheic ? l.outflow !== 0 : Math.abs(l.level - l.spillLevel) > 1e-12));
+    check('H4 水量平衡自洽（内流湖无出水 / 外流湖顶到溢出点）', badBalance.length === 0,
+      `${endorheic.length} 内流 / ${lks.length - endorheic.length} 外流`);
+
+    // M18 目标区间（唯一旋钮是 potentialEvaporation，标定见 docs/hydro-layer.md §7）
+    check('H4 内流盆地数在目标区间（M18，5–25）',
+      endorheic.length >= 5 && endorheic.length <= 25,
+      `${endorheic.length} 个（potentialEvaporation = ${CONFIG.hydro.potentialEvaporation}）`);
+
+    // 渲染分档：内流 → 盐湖；外流 → 按湖深分浅/深。湖面格的颜色必须真的来自 LAKE_COLOR
+    const tierOK = lks.every((l) => (l.isEndorheic
+      ? l.tier === LAKE_TIER.SALT
+      : (l.depthMean < CONFIG.hydro.lakeShallowDepth) === (l.tier === LAKE_TIER.SHALLOW)));
+    const lakeColors = Object.values(LAKE_COLOR).map((h) => new THREE.Color(h));
+    const isLakeColored = (c) => lakeColors.some((t) => Math.abs(c.r - t.r) < 1e-3
+      && Math.abs(c.g - t.g) < 1e-3 && Math.abs(c.b - t.b) < 1e-3);
+    check('H4 湖面颜色分档与水量平衡一致', tierOK
+      && lakeCells.every((i) => isLakeColored(tiles[i].baseColor)),
+      `盐湖 ${endorheic.length}` +
+      ` · 浅湖 ${lks.filter((l) => l.tier === LAKE_TIER.SHALLOW).length}` +
+      ` · 深湖 ${lks.filter((l) => l.tier === LAKE_TIER.DEEP).length}`);
+
+    // M38 河线在湖边断开（**构造保证**：几何体只画 `isRiver && lakeId < 0` 的格子）。
+    // `lakeBreaks > 0` 是"这条断言不空转"的证据 —— 真有人口含湖的话它必须 > 0。
+    if (gfx.riverStats) {
+      const rs = gfx.riverStats;
+      let riverTotal = 0, riverInLake = 0;
+      for (let i = 0; i < tiles.length; i++) {
+        if (!hyl.isRiver[i]) continue;
+        riverTotal++;
+        if (hyl.lakeId[i] >= 0) riverInLake++;
+      }
+      check('H4 河线在湖边断开（M38：河面格不画线、入湖链收口在湖岸）',
+        riverInLake > 0 && rs.lakeBreaks > 0 && rs.lineCells === riverTotal - riverInLake,
+        `${riverTotal} 河格 − ${riverInLake} 湖面河格 = ${rs.lineCells} 个画线格 · ` +
+        `${rs.lakeBreaks} 条链收口在湖岸`);
+    }
+  }
+
   // 生物群系统计
   const stats = {};
   for (const t of tiles) stats[t.biome] = (stats[t.biome] || 0) + 1;
@@ -2866,8 +3124,10 @@ function init() {
     for (const v of tile.vertices) sumR += v.length();
     tile.avgRadius = sumR / tile.vertices.length;
 
-    // 4.2 群系本色（线性空间）。高亮/选中时以它为基准做瞬时提亮
-    tile.baseColor = new THREE.Color(BIOME_COLOR[tile.biome]);
+    // 4.2 地表本色（线性空间）= 群系本色，被湖面覆盖（★ H4）。
+    //     高亮/选中时以它为基准做瞬时提亮
+    tile.baseColor = new THREE.Color();
+    applyTileBaseColor(tile);
   }
 
   // 4.3 一次性打包成单一几何体。返回的映射表是「渲染 → 业务」唯一的桥
@@ -2991,13 +3251,21 @@ function init() {
      * 调试：只显示指定的群系，其余格子调成背景色（截图对比用）。
      * 传 null / 空数组恢复全部。因为只有 1 个 Mesh，这里靠改顶点色实现，
      * draw call 依旧是 1。
+     *
+     * ★ H4 加一个调试令牌 `'__lake__'`：只留**湖面格**（其余刷背景色），
+     *   用于出"湖泊清单图"。`'__none__'` 照旧 = 全刷背景色（两处都是截图专用，
+     *   和 `'__none__'` 一样不属于群系枚举，所以不会和真实群系名冲突）。
      */
     setVisibleBiomes(list) {
       const keep = list && list.length ? new Set(list) : null;
+      const onlyLakes = !!keep && keep.has('__lake__');
       for (const tile of tiles) {
         // 被筛掉的格子刷成背景色。用 copy 而不是 getHex/setHex 往返，避免色彩空间来回转换
-        if (keep && !keep.has(tile.biome)) tile.baseColor.copy(scene.background);
-        else tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
+        const drop = keep && (onlyLakes
+          ? world.hydro.lakeId[tile.index] < 0
+          : !keep.has(tile.biome));
+        if (drop) tile.baseColor.copy(scene.background);
+        else applyTileBaseColor(tile);
       }
       repaintAll();
       return keep ? keep.size : 'all';
@@ -3011,14 +3279,14 @@ function init() {
       rebuildRivers();
       const stats = {};
       for (const tile of tiles) {
-        tile.baseColor.setHex(BIOME_COLOR[tile.biome]);
+        applyTileBaseColor(tile);
         stats[tile.biome] = (stats[tile.biome] || 0) + 1;
       }
       repaintAll();
       return stats;
     },
 
-    /* 自测结果（页面内跑的那 17 条；验收脚本断言"无失败项"，免得只能靠人眼看控制台） */
+    /* 自测结果（页面内跑的那批断言；验收脚本断言"无失败项"，免得只能靠人眼看控制台） */
     selfTest,
 
     /* 性能计数（验收用） */
